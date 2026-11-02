@@ -33,6 +33,9 @@ void gfx_end(void);               /* flushes what is left */
 void gfx_flush(void);
 void gfx_invalidate_state(void);
 float gfx_scale(void);            /* surface pixels per layout unit */
+void  gfx_view_rect(int *x, int *y, int *w, int *h); /* the letterboxed UI viewport in surface pixels (GL bottom-left origin) */
+void  gfx_surface_to_layout(float *x, float *y);     /* drawable pixels (top-left origin) -> 1920x1080 layout */
+void  gfx_layout_to_surface(float x, float y, float w, float h, int *px, int *py, int *pw, int *ph); /* layout -> drawable pixels (top-left origin) */
 void  gfx_xform_point(float *x, float *y);   /* layout -> surface pixels, through the offset and scale stacks */
 
 /* shapes (SDF rounded rectangles) */

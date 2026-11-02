@@ -226,6 +226,7 @@ int main(int argc, char **argv) {
   plat_post_window(win);
   SDL_StopTextInput();
   int dw, dh; SDL_GL_GetDrawableSize(win, &dw, &dh);
+  int curWinW = w, curWinH = h; /* the window's current size (pointer mapping follows resizes, not the startup size) */
   fprintf(stderr, "[start] %s window %dx%d drawable %dx%d\n", plat_device_name(), w, h, dw, dh);
   if (!gfx_init(dw, dh)) return 1;
   video_set_surface(dw, dh); /* the TV reads the video plane's rectangle in the drawable's pixels (720p light: 1280x720) */
@@ -265,15 +266,34 @@ int main(int argc, char **argv) {
     while (SDL_PollEvent(&e)) {
       if (getenv("SB_EVLOG") || frame < 120) if (e.type == SDL_QUIT || e.type == SDL_KEYDOWN || e.type == SDL_KEYUP || e.type == SDL_WINDOWEVENT) fprintf(stderr, "[ev] type=%d%s sc=%d sym=%d win=%d\n", e.type, e.type == SDL_QUIT ? " QUIT" : "", e.type == SDL_KEYDOWN || e.type == SDL_KEYUP ? e.key.keysym.scancode : 0, e.type == SDL_KEYDOWN || e.type == SDL_KEYUP ? e.key.keysym.sym : 0, e.type == SDL_WINDOWEVENT ? e.window.event : 0);
       if (e.type == SDL_QUIT) { fprintf(stderr, "[exit] SDL_QUIT\n"); app_quit(); }
+#ifdef SB_LINUX
+      else if (e.type == SDL_KEYDOWN && (e.key.keysym.sym == SDLK_F11 || (e.key.keysym.sym == SDLK_RETURN && (e.key.keysym.mod & KMOD_ALT)))) { /* desktop fullscreen toggle */
+        Uint32 fl = SDL_GetWindowFlags(win);
+        SDL_SetWindowFullscreen(win, (fl & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP)) ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+      }
+#endif
       else if (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) { int k = plat_map_key(&e.key);
         if (k == K_BACK && e.key.keysym.sym == SDLK_ESCAPE && e.type == SDL_KEYDOWN && SCR == SCR_LOGIN) app_quit();
         if (k) app_key(k, e.type == SDL_KEYDOWN, e.key.repeat); }
       else if (e.type == SDL_TEXTINPUT) app_text(e.text.text);
       else if (script && (e.type == SDL_MOUSEMOTION || e.type == SDL_MOUSEBUTTONDOWN || e.type == SDL_MOUSEBUTTONUP || e.type == SDL_MOUSEWHEEL)) {} /* a scripted run: the real mouse stays out */
+#ifdef SB_LINUX
+      else if (e.type == SDL_MOUSEMOTION) { if ((e.motion.x || e.motion.y) && curWinW > 0 && curWinH > 0) { int ww, hh; SDL_GL_GetDrawableSize(win, &ww, &hh); float lx = (float)e.motion.x * ww / curWinW, ly = (float)e.motion.y * hh / curWinH; gfx_surface_to_layout(&lx, &ly); app_pointer_move(lx, ly); } }
+      else if (e.type == SDL_MOUSEBUTTONDOWN || e.type == SDL_MOUSEBUTTONUP) { if (e.button.button == SDL_BUTTON_LEFT && curWinW > 0 && curWinH > 0) { int ww, hh; SDL_GL_GetDrawableSize(win, &ww, &hh); float lx = (float)e.button.x * ww / curWinW, ly = (float)e.button.y * hh / curWinH; gfx_surface_to_layout(&lx, &ly); app_pointer_button(e.type == SDL_MOUSEBUTTONDOWN, lx, ly); } }
+#else
       else if (e.type == SDL_MOUSEMOTION) { if (e.motion.x || e.motion.y) app_pointer_move(e.motion.x * SB_W / w, e.motion.y * SB_H / h); }
       else if (e.type == SDL_MOUSEBUTTONDOWN || e.type == SDL_MOUSEBUTTONUP) { if (e.button.button == SDL_BUTTON_LEFT) app_pointer_button(e.type == SDL_MOUSEBUTTONDOWN, e.button.x * SB_W / w, e.button.y * SB_H / h); }
+#endif
       else if (e.type == SDL_MOUSEWHEEL) app_pointer_wheel((float)e.wheel.x, (float)e.wheel.y);
+#ifdef SB_LINUX
+      else if (e.type == SDL_WINDOWEVENT && (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED || e.window.event == SDL_WINDOWEVENT_RESIZED)) {
+        SDL_GetWindowSize(win, &curWinW, &curWinH);
+        SDL_GL_GetDrawableSize(win, &dw, &dh); gfx_resize(dw, dh); video_set_surface(dw, dh);
+        img_set_draw_scale(gfx_scale()); text_set_scale(gfx_scale());
+      }
+#else
       else if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) { SDL_GL_GetDrawableSize(win, &dw, &dh); gfx_resize(dw, dh); }
+#endif
     }
     Uint32 now = SDL_GetTicks(); float dt = (now - last) / 1000.0f; last = now;
     { float pp = (float)pace_period() / 1000.0f; if (pp <= 0) pp = 1 / 60.0f; /* motion on the 60 Hz clock: an on-time frame is one period (no millisecond jitter); a slow one moves it 3 periods at most (no jump) */
@@ -297,6 +317,7 @@ int main(int argc, char **argv) {
     app_tick(dt); splash_tick(dt);
     Uint32 tA = SDL_GetTicks();
     gfx_begin(player_live() ? RGBA(0, 0, 0, 0) : PAGE); /* the video plane shows through the transparent window */
+    video_render(); /* desktop GL backends draw the decoded frame here, under the UI */
     { static int bench = -2, benchCalls = 0; if (bench == -2) { bench = getenv("SB_BENCH") ? atoi(getenv("SB_BENCH")) : -1; benchCalls = getenv("SB_BENCHCALLS") ? atoi(getenv("SB_BENCHCALLS")) : 0; }
       static GLuint bt[64]; static int btN = -1; if (btN < 0) { btN = getenv("SB_BENCHTEX") ? atoi(getenv("SB_BENCHTEX")) : 0; if (btN > 64) btN = 64; int ch = getenv("SB_BENCHTEX_ALPHA") ? 1 : 4, tw = getenv("SB_BENCHTEX_W") ? atoi(getenv("SB_BENCHTEX_W")) : 300, th = getenv("SB_BENCHTEX_H") ? atoi(getenv("SB_BENCHTEX_H")) : 40; int lin = getenv("SB_BENCHTEX_NEAREST") ? 0 : 1;
         unsigned char *px = malloc((size_t)tw * th * ch); for (int i = 0; i < btN; i++) { memset(px, 40 + i * 5, (size_t)tw * th * ch); bt[i] = gfx_tex_create(px, tw, th, ch, lin); } free(px); } /* SB_BENCHTEX=N: N distinct textures bound per frame */

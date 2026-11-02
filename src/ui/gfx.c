@@ -33,6 +33,7 @@ static int batchOpaque = 1, blendOn = 1;
 static GLuint vbos[3]; static int vboCur; static GLsizeiptr vboOff, vboCap; static double flushMs; static int flushN; /* three streaming buffers in turn: the GPU may still read the last frame's */
 static int surfW, surfH;
 static float scl = 1.0f;
+static int viewX, viewY, viewW, viewH; /* letterboxed UI viewport (GL bottom-left origin): 16:9 layout centred in the window */
 static int drawCalls, quadsDrawn;
 
 /* clip, opacity and transform stacks */
@@ -134,7 +135,25 @@ int gfx_init(int w, int h) {
   fprintf(stderr, "[gfx] %s | %s | %s\n", glGetString(GL_VENDOR), glGetString(GL_RENDERER), glGetString(GL_VERSION));
   return 1;
 }
-void gfx_resize(int w, int h) { surfW = w; surfH = h; scl = (float)w / SB_W; glViewport(0, 0, w, h); }
+void gfx_resize(int w, int h) {
+  surfW = w; surfH = h;
+  float s = fminf((float)w / SB_W, (float)h / SB_H); /* uniform scale: the whole 16:9 layout stays visible at any window shape */
+  if (s <= 0) s = 1.0f;
+  scl = s;
+  viewW = (int)(SB_W * s + 0.5f); viewH = (int)(SB_H * s + 0.5f);
+  viewX = (w - viewW) / 2; viewY = (h - viewH) / 2;
+  glViewport(viewX, viewY, viewW, viewH);
+}
+void gfx_view_rect(int *x, int *y, int *w, int *h) { if (x) *x = viewX; if (y) *y = viewY; if (w) *w = viewW; if (h) *h = viewH; }
+void gfx_surface_to_layout(float *x, float *y) {
+  float oyTop = (float)(surfH - viewY - viewH); /* == viewY when centred, kept explicit for clarity */
+  *x = (*x - (float)viewX) / scl; *y = (*y - oyTop) / scl;
+}
+void gfx_layout_to_surface(float x, float y, float w, float h, int *px, int *py, int *pw, int *ph) {
+  float oyTop = (float)(surfH - viewY - viewH);
+  if (px) *px = (int)(viewX + x * scl + 0.5f); if (py) *py = (int)(oyTop + y * scl + 0.5f);
+  if (pw) *pw = (int)(w * scl + 0.5f); if (ph) *ph = (int)(h * scl + 0.5f);
+}
 float gfx_scale(void) { return scl; }
 int gfx_draw_calls(void) { return drawCalls; }
 static long poolBytes, texBytes; static int npool, texCount;
@@ -156,7 +175,7 @@ int gfx_quads(void) { return quadsDrawn; }
 
 static void use(int p) {
   Prog *P = &progs[p]; glUseProgram(P->prog);
-  glUniform1f(P->uScale, scl); glUniform2f(P->uView, (float)surfW, (float)surfH);
+  glUniform1f(P->uScale, scl); glUniform2f(P->uView, (float)viewW, (float)viewH);
   if (P->uTex >= 0) glUniform1i(P->uTex, 0);
   glEnableVertexAttribArray(P->aPos); glVertexAttribPointer(P->aPos, 2, GL_FLOAT, GL_FALSE, sizeof(Vtx), (void *)0);
   glEnableVertexAttribArray(P->aUv); glVertexAttribPointer(P->aUv, 2, GL_FLOAT, GL_FALSE, sizeof(Vtx), (void *)8);
@@ -193,18 +212,25 @@ void gfx_flush(void) {
 }
 static void apply_clip(void) {
   gfx_flush();
-  if (nclip) { int x = (int)floorf(curClip.x * scl), y = (int)floorf(curClip.y * scl), w = (int)ceilf((curClip.x + curClip.w) * scl) - x, h = (int)ceilf((curClip.y + curClip.h) * scl) - y;
+  if (nclip) { int x = viewX + (int)floorf(curClip.x * scl), y = viewY + (int)floorf((SB_H - curClip.y - curClip.h) * scl), w = (int)ceilf((curClip.x + curClip.w) * scl) - (x - viewX), h = (int)ceilf((SB_H - curClip.y) * scl) - (y - viewY);
     if (w < 0) w = 0; if (h < 0) h = 0;
-    glEnable(GL_SCISSOR_TEST); glScissor(x, surfH - y - h, w, h); }
+    glEnable(GL_SCISSOR_TEST); glScissor(x, y, w, h); }
   else glDisable(GL_SCISSOR_TEST);
 }
-void gfx_invalidate_state(void) { curProg = -1; curTex = 0; } /* someone else drew with raw GL: the next batch sets everything again */
+void gfx_invalidate_state(void) { curProg = -1; curTex = 0; blendOn = -1; glDisable(GL_SCISSOR_TEST); glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); glActiveTexture(GL_TEXTURE0); } /* someone else drew with raw GL: the next batch sets everything again */
 double gfx_flush_ms(int reset) { double v = flushN ? flushMs : 0; if (reset) { flushMs = 0; flushN = 0; } return v; }
 void gfx_set_screen_fbo(GLuint fbo) { screenFbo = fbo; }
 void gfx_begin(uint32_t c) {
   glBindFramebuffer(GL_FRAMEBUFFER, screenFbo);
+  /* letterbox bars: full-window black first, then the UI viewport clears to its own colour (transparent when video shows through) */
+  glViewport(0, 0, surfW, surfH);
+  glDisable(GL_SCISSOR_TEST);
+  glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);
+  glViewport(viewX, viewY, viewW, viewH);
   scrDirty = 0; frameCounter++; pool_age(); vboCur = (vboCur + 1) % 3; glBindBuffer(GL_ARRAY_BUFFER, vbos[vboCur]); vboOff = 0; /* this frame's buffer: the GPU finished with it two frames ago */
-  nvtx = 0; curProg = -1; curTex = 0; nclip = 0; nopac = 0; curOpac = 1; noff = 0; curOx = curOy = 0; nsc = 0; curSx = curSy = 1; drawCalls = quadsDrawn = 0; fillFrames++;
+  nvtx = 0; curProg = -1; curTex = 0; blendOn = -1; glEnable(GL_BLEND);
+  glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+  nclip = 0; nopac = 0; curOpac = 1; noff = 0; curOx = curOy = 0; nsc = 0; curSx = curSy = 1; drawCalls = quadsDrawn = 0; fillFrames++;
   glDisable(GL_SCISSOR_TEST);
   static int noClear = -1; if (noClear < 0) noClear = getenv("SB_NOCLEAR") != NULL;
   glClearColor(((c >> 16) & 255) / 255.0f, ((c >> 8) & 255) / 255.0f, (c & 255) / 255.0f, ((c >> 24) & 255) / 255.0f);
@@ -487,7 +513,7 @@ int gfx_target_create(GfxTarget *t, int w, int h) {
   t->w = w; t->h = h; return 1;
 }
 void gfx_target_free(GfxTarget *t) { if (t->fbo) glDeleteFramebuffers(1, &t->fbo); if (t->tex) gfx_tex_free(t->tex); memset(t, 0, sizeof *t); }
-static struct { int on, surfW, surfH, nclip, nopac, noff, nsc; float scl, curOpac, curOx, curOy, curSx, curSy, curSox, curSoy; Clip curClip, clips[16]; float opac[16], offx[16], offy[16], scx[16], scy[16], sox[16], soy[16], scOx[16], scOy[16]; } saved;
+static struct { int on, surfW, surfH, nclip, nopac, noff, nsc, viewX, viewY, viewW, viewH; float scl, curOpac, curOx, curOy, curSx, curSy, curSox, curSoy; Clip curClip, clips[16]; float opac[16], offx[16], offy[16], scx[16], scy[16], sox[16], soy[16], scOx[16], scOy[16]; } saved;
 /* a blur pass: src (a target's texture, w x h texels) drawn over the whole of dst, blurred along one axis; spread
    scales the step (1 = adjacent texels) */
 void gfx_blur_pass(GfxTarget *dst, GLuint src, int w, int h, int vertical, float spread) {
@@ -503,7 +529,7 @@ int gfx_mid_switches(void) { int n = midSwitch; midSwitch = 0; return n; }
 void gfx_target_begin(GfxTarget *t, uint32_t c) {
   gfx_flush();
   if (scrDirty) { midSwitch++; if (getenv("SB_MIDLOG")) fprintf(stderr, "[mid] %ux%u at frame %u\n", t->w, t->h, frameCounter); }
-  tgtOn = 1; saved.on = 1; saved.surfW = surfW; saved.surfH = surfH; saved.scl = scl; saved.nclip = nclip; saved.nopac = nopac; saved.noff = noff; saved.nsc = nsc;
+  tgtOn = 1; saved.on = 1; saved.surfW = surfW; saved.surfH = surfH; saved.scl = scl; saved.viewX = viewX; saved.viewY = viewY; saved.viewW = viewW; saved.viewH = viewH; saved.nclip = nclip; saved.nopac = nopac; saved.noff = noff; saved.nsc = nsc;
   saved.curOpac = curOpac; saved.curOx = curOx; saved.curOy = curOy; saved.curSx = curSx; saved.curSy = curSy; saved.curSox = curSox; saved.curSoy = curSoy; saved.curClip = curClip;
   memcpy(saved.clips, clips, sizeof clips); memcpy(saved.opac, opac, sizeof opac); memcpy(saved.offx, offx, sizeof offx); memcpy(saved.offy, offy, sizeof offy); memcpy(saved.scx, scx, sizeof scx); memcpy(saved.scy, scy, sizeof scy); memcpy(saved.sox, sox, sizeof sox); memcpy(saved.soy, soy, sizeof soy); memcpy(saved.scOx, scOx, sizeof scOx); memcpy(saved.scOy, scOy, sizeof scOy);
   nclip = 0; nopac = 0; noff = 0; nsc = 0; curOpac = 1; curOx = curOy = 0; curSx = curSy = 1; curSox = curSoy = 0;
@@ -516,7 +542,7 @@ int gfx_in_target(void) { return saved.on; }
 void gfx_target_end(void) {
   if (!saved.on) return;
   gfx_flush(); saved.on = 0; tgtOn = 0; fadeOff = 0;
-  glBindFramebuffer(GL_FRAMEBUFFER, screenFbo); surfW = saved.surfW; surfH = saved.surfH; scl = saved.scl; glViewport(0, 0, surfW, surfH);
+  glBindFramebuffer(GL_FRAMEBUFFER, screenFbo); surfW = saved.surfW; surfH = saved.surfH; scl = saved.scl; viewX = saved.viewX; viewY = saved.viewY; viewW = saved.viewW; viewH = saved.viewH; glViewport(viewX, viewY, viewW, viewH);
   nclip = saved.nclip; nopac = saved.nopac; noff = saved.noff; nsc = saved.nsc; curOpac = saved.curOpac; curOx = saved.curOx; curOy = saved.curOy;
   curSx = saved.curSx; curSy = saved.curSy; curSox = saved.curSox; curSoy = saved.curSoy; curClip = saved.curClip;
   memcpy(clips, saved.clips, sizeof clips); memcpy(opac, saved.opac, sizeof opac); memcpy(offx, saved.offx, sizeof offx); memcpy(offy, saved.offy, sizeof offy); memcpy(scx, saved.scx, sizeof scx); memcpy(scy, saved.scy, sizeof scy); memcpy(sox, saved.sox, sizeof sox); memcpy(soy, saved.soy, sizeof soy); memcpy(scOx, saved.scOx, sizeof scOx); memcpy(scOy, saved.scOy, sizeof scOy);

@@ -24,6 +24,7 @@ typedef struct {
 } SbLine;
 
 int  text_init(const char *assetDir, float surfaceScale);
+void text_set_scale(float surfaceScale); /* window resized: new glyphs rasterise at the new resolution (old cache ages out) */
 void text_set_rtl(int rtl);      /* the UI direction: START/END alignment, base paragraph direction */
 int  text_rtl(void);
 void text_frame_begin(void);     /* resets the per-frame rasterising budget */

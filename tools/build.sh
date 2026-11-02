@@ -22,6 +22,11 @@ case "$TARGET" in
     TFLAGS="-DSB_MAC=1 -I$MACSDL/include -I$MACSDL/include/SDL2"
     LIBS="$($MACSDL/bin/sdl2-config --static-libs) -Wl,-framework,OpenGL -lcurl -liconv -lz"
     PLAT=mac ;;
+  linux)
+    CC="cc"; CXX="c++"; AR="ar"; WEBPCC="cc -U__SSE2__ -U__SSE4_1__"
+    TFLAGS="-DSB_MAC=1 -DSB_LINUX=1 -U__SSE2__ -U__SSE4_1__"
+    LIBS="$(sdl2-config --libs) -lGL -lmpv -lcurl -lz -lpthread -lm -ldl"
+    PLAT=linux ;;
   webos)
     CC="$ZIG cc -target arm-linux-gnueabi.2.12 -mcpu=cortex_a9 -mfloat-abi=softfp"
     WEBPCC="$ZIG cc -target arm-linux-gnueabi.2.12 -mcpu=cortex_a9-neon -mfloat-abi=softfp"   # libwebp's NEON paths break this compiler's backend: plain C there
@@ -108,7 +113,7 @@ for f in "$ROOT"/src/core/*.c "$ROOT"/src/ui/*.c "$ROOT"/src/screens/*.c "$ROOT"
   fi
   OBJS+=("$o")
 done
-if [ "$TARGET" = mac ]; then
+if [ "$TARGET" = mac ] || [ "$TARGET" = linux ]; then
   $CXX $OPT -o "$B/stremioorigin" "${OBJS[@]}" "$B/tp/libass.a" "$B/tp/libtp.a" $LIBS
 else
   $CXX $OPT -Wl,--gc-sections -o "$B/stremioorigin.dbg" "${OBJS[@]}" "$B/tp/libass.a" "$B/tp/libtp.a" $LIBS   # symbols kept: crash addresses resolve against it

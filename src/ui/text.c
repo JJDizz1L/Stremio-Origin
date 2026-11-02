@@ -209,6 +209,7 @@ int text_init(const char *assetDir, float surfaceScale) {
   if (!getenv("SB_TEXT_SYNC")) { pthread_t th; if (!pthread_create(&th, NULL, text_worker, NULL)) { pthread_detach(th); textThread = 1; } } /* SB_TEXT_SYNC: everything on the drawing thread (for comparison) */
   return 1;
 }
+void text_set_scale(float surfaceScale) { if (surfaceScale > 0) sscale = surfaceScale; }
 void text_set_rtl(int r) { uiRtl = !!r; shapeRtl = uiRtl; }
 int text_rtl(void) { return uiRtl; }
 static unsigned frameNo;

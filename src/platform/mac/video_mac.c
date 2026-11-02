@@ -60,3 +60,5 @@ int video_audio_unsupported(void) {
   if (!getenv("SB_VID_NODTS") || st != VID_PLAYING || pos < 1) return 0;
   VidTrack t[16]; int n = video_audio_tracks(t, 16); return cur < n && (strstr(t[cur].codec, "dts") || strstr(t[cur].codec, "truehd"));
 }
+
+void video_render(void) {}

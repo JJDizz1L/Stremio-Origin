@@ -46,4 +46,5 @@ int    video_set_crop(int sx, int sy, int sw, int sh, float dx, float dy, float 
 void   video_set_surface(int w, int h);      /* the drawable's size: the plane's rectangle is read in its pixels */
 int    video_audio_unsupported(void);        /* 1 when the TV plays the picture but not this audio track */
 void   video_pump(void);                     /* delivers the platform's events; call per frame */
+void   video_render(void);                   /* draws the current frame into the GL framebuffer (desktop GL backends) */
 #endif
