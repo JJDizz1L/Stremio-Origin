@@ -5,6 +5,7 @@
 #include "screens/search.h"
 #include "core/keys.h"
 #include "core/i18n.h"
+#include "platform/plat.h"
 #include "ui/gfx.h"
 #include "ui/text.h"
 #include "ui/img.h"
@@ -17,6 +18,7 @@
 #include "core/httpd.h"
 #include "core/tmdb.h"
 #include "ui/qr.h"
+#include <SDL2/SDL.h>
 
 #define SKEYS "abcdefghijklmnopqrstuvwxyz1234567890"
 #define NK 36
@@ -56,6 +58,8 @@ static void results_draw_state(void) {
   if (S.ri >= S.items.n) S.ri = S.items.n ? S.items.n - 1 : 0; if (S.si >= S.nsug) S.si = S.nsug ? S.nsug - 1 : 0;
   if (S.zone == 2 && !S.items.n) S.zone = 0; if (S.zone == 1 && !S.nsug) S.zone = 0;
 }
+/* physical backspace (desktop only: the remote's Back keeps navigating): deletes a letter while the query has one */
+static int backspace_q(void) { if (!plat_text_input() || !S.q[0]) return 0; char q[64]; snprintf(q, sizeof q, "%s", S.q); size_t n = strlen(q); n--; while (n && ((unsigned char)q[n] & 0xc0) == 0x80) n--; q[n] = 0; set_q(q); return 1; }
 /* the same title from two sources (an IMDb id and another addon's id): the same kind, name and year */
 static int same_title(const Item *a, const Item *b) { return !strcmp(a->id, b->id) || (!strcmp(a->type, b->type) && !strcasecmp(a->name, b->name) && !strncmp(a->metaLine, b->metaLine, 4)); }
 /* a notice an addon sends as a result (its search failing, a missing key): not a title. Its id says so, or a name
@@ -122,8 +126,13 @@ static void phone_tick(void) {
   if (!S.seqKnown) { S.seqKnown = 1; S.seq = sq; return; } /* what was typed before this visit stays out */
   if (sq > S.seq) { S.seq = sq; S.phone = 1; app_glow_kick(); snprintf(S.q, sizeof S.q, "%.40s", t); S.livePending = 0; live(); }
 }
-static void enter(const void *p) { (void)p; S.zone = (S.zone == 2 && S.items.n) ? 2 : 0; timer_start(&S.in, 0.42f); results_draw_state(); S.typedAt = app_now() - 0.8; phone_ask(); }
-static void leave(void) {} /* Search keeps its query and results for when you come back */
+static void enter(const void *p) { (void)p; S.zone = (S.zone == 2 && S.items.n) ? 2 : 0; timer_start(&S.in, 0.42f); results_draw_state(); S.typedAt = app_now() - 0.8; phone_ask(); if (plat_text_input()) SDL_StartTextInput(); } /* desktop: the physical keyboard types straight into the query */
+static void leave(void) { SDL_StopTextInput(); } /* Search keeps its query and results for when you come back */
+static void text(const char *s) { /* typed text from the physical keyboard (SDL_TEXTINPUT): appended to the query */
+  char q[96]; size_t n = 0; q[0] = 0;
+  for (const char *c = s; *c && n + 4 < sizeof q;) { unsigned char b = *c; if (b < 0x20) { c++; continue; } /* no newlines/tabs from a paste */
+    int len = b < 0x80 ? 1 : b >= 0xf0 ? 4 : b >= 0xe0 ? 3 : b >= 0xc0 ? 2 : 1; int k; for (k = 0; k < len && c[k]; k++) q[n++] = c[k]; q[n] = 0; c += k ? k : 1; }
+  if (!q[0]) return; char full[96]; snprintf(full, sizeof full, "%s%s", S.q, q); set_q(full); }
 static const Item *focused(void) { return S.zone == 2 && S.ri < S.items.n ? &S.items.items[S.ri] : NULL; }
 static int key(int k) {
   int rows = rows_of(), C = SGC; int z0 = S.zone, kr0 = S.kr, kc0 = S.kc, si0 = S.si, ri0 = S.ri;
@@ -133,7 +142,7 @@ static int key(int k) {
     else if (k == K_UP) { if (S.kr > 0) S.kr--; else { topnav_focus(); return 1; } }
     else if (k == K_DOWN) { if (S.kr < rows) S.kr++; }
     else if (k == K_OK) type_key(key_at(S.kr, S.kc));
-    else if (k == K_BACK) return 0;
+    else if (k == K_BACK) { if (backspace_q()) return 1; return 0; }
     if (k != K_OK && z0 == S.zone && kr0 == S.kr && kc0 == S.kc) nudge_start(&S.nudge, k); /* the key with its ring */
   } else if (S.zone == 1) {
     if (k == K_LEFT) { if (S.si > 0) S.si--; else S.zone = 0; }
@@ -141,7 +150,7 @@ static int key(int k) {
     else if (k == K_DOWN) { if (S.items.n) { S.zone = 2; S.ri = 0; } }
     else if (k == K_UP) { topnav_focus(); return 1; }
     else if (k == K_OK) { snprintf(S.q, sizeof S.q, "%.40s", S.sug[S.si]); S.livePending = 0; live(); }
-    else if (k == K_BACK) { S.zone = 0; return 1; }
+    else if (k == K_BACK) { if (backspace_q()) return 1; S.zone = 0; return 1; }
     if (k != K_OK && z0 == S.zone && si0 == S.si) nudge_start(&S.nudge, k);
   } else {
     int r = S.ri / C, c = S.ri % C;
@@ -150,7 +159,7 @@ static int key(int k) {
     else if (k == K_UP) { if (r > 0) S.ri -= C; else if (S.nsug) S.zone = 1; }
     else if (k == K_DOWN) { if (S.ri + C < S.items.n) S.ri += C; else if (r < (S.items.n - 1) / C) S.ri = S.items.n - 1; }
     else if (k == K_OK) { app_open_item(&S.items.items[S.ri]); return 1; }
-    else if (k == K_BACK) { S.zone = 0; return 1; }
+    else if (k == K_BACK) { if (backspace_q()) return 1; S.zone = 0; return 1; }
     if (z0 == S.zone && ri0 == S.ri) nudge_start(&S.nudge, k);
   }
   return 1;
@@ -251,4 +260,4 @@ static void draw(void) {
   gfx_offset_pop(); gfx_opacity_pop(); gfx_clip_pop();
   gfx_offset_pop(); gfx_opacity_pop();
 }
-Screen searchScreen = { enter, leave, key, tick, draw, focused, NULL, NULL };
+Screen searchScreen = { enter, leave, key, tick, draw, focused, NULL, text };

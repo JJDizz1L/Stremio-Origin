@@ -141,6 +141,7 @@ static struct {
        it is, dvTried started once already, dvSeen what the TV showed was checked */
     int dv, copyA, dvTried, dvSeen; double dvAt; } dts;
   int assPlain; /* styled subtitles were too slow here: plain for the rest of this film */ double lastSave; int marked; char aspect[8]; const char *res; char infoKey[256]; int pausedShown; double pausedAt;
+  Mo volA; double volAt; /* the volume pill: shown only while the volume is being changed */
   /* torrents: resolved by the engine first; the file's own subtitles and chapters from the stream itself */
   int isP2p, resolving; double posTick; int mkvTracksOk, chapWant;
   Nudge nudge; double nameAt;
@@ -871,7 +872,7 @@ static void cancel_seek(void) { P.seekT = -1; P.skm = 0; P.skOn = 0; P.seekTxtUn
    with cinema bars baked in loses them; any other shape is cropped further). Chosen per title (a show keeps it from
    episode to episode), else the default from Settings ---- */
 static void aspect_key(char *k, size_t cap) { snprintf(k, cap, "aspect_%.*s", (int)strcspn(P.id, ":"), P.id); }
-static void aspect_load(void) { char k[96]; aspect_key(k, sizeof k); const char *a = store_get(k, ""); if (!*a) a = store_get("aspectMode", "fit"); snprintf(P.aspect, sizeof P.aspect, "%s", strcmp(a, "stretch") ? a : "fit"); }
+static void aspect_load(void) { char k[96]; aspect_key(k, sizeof k); const char *a = store_get(k, ""); if (!*a) a = store_get("aspectMode", "fill"); snprintf(P.aspect, sizeof P.aspect, "%s", strcmp(a, "stretch") ? a : "fit"); }
 /* the web sizes the picture's box (Fill / Zoom go past the screen); a TV's plane blanks for a rectangle that leaves
    the screen, so the part of that box on the screen is shown as a crop of the frame instead */
 static void apply_aspect(void) {
@@ -1077,10 +1078,39 @@ static int src_tray(void) { int ak = P.tray.kind < 0 ? -P.tray.kind : P.tray.kin
 static void srcs_free(void) { for (int i = 0; i < P.srcs.ng; i++) { free(P.srcs.g[i].items); free(P.srcs.g[i].h); } memset(&P.srcs, 0, sizeof P.srcs); free(SR.r); SR.r = NULL; SR.n = SR.cap = 0; SR.idx = -1; }
 static void src_rows(void);
 static int src_find(unsigned tok) { if (!tok) return -1; for (int i = 0; i < P.srcs.ng; i++) if (P.srcs.g[i].tok == tok) return i; return -1; }
+/* found stream sources, kept for the session (text only): the sources tray shows them at once
+   instead of asking the addons again. Memory only: gone when the app closes, fresh next start. */
+#define SCACHE_G 16
+#define SCACHE_N 64
+static struct { char key[160]; int ng; struct { char name[96]; Stream *items; int n; } g[SCACHE_G]; } scache[SCACHE_N];
+static int scacheN;
+static void scache_key(char *o, size_t n) { snprintf(o, n, "%s|%s", P.type, P.srcs.vid); }
+static int scache_find(const char *key) { for (int i = 0; i < scacheN; i++) if (!strcmp(scache[i].key, key)) return i; return -1; }
+static void scache_store(int gi) { /* a finished group lands in the session cache */
+  __typeof__(P.srcs.g[0]) *g = &P.srcs.g[gi];
+  if (!g->items || !g->n) return;
+  char key[160]; scache_key(key, sizeof key); int e = scache_find(key);
+  if (e < 0) { if (scacheN >= SCACHE_N) return; e = scacheN++; snprintf(scache[e].key, sizeof scache[e].key, "%s", key); }
+  int s = -1; for (int i = 0; i < scache[e].ng; i++) if (!strcmp(scache[e].g[i].name, g->name)) s = i;
+  if (s < 0) { if (scache[e].ng >= SCACHE_G) return; s = scache[e].ng++; snprintf(scache[e].g[s].name, sizeof scache[e].g[s].name, "%s", g->name); }
+  free(scache[e].g[s].items);
+  scache[e].g[s].items = malloc(sizeof(Stream) * (size_t)g->n); if (!scache[e].g[s].items) { scache[e].g[s].n = 0; return; }
+  memcpy(scache[e].g[s].items, g->items, sizeof(Stream) * (size_t)g->n); scache[e].g[s].n = g->n; /* Stream is flat text: a copy is a copy */
+}
+static void scache_install(void) { /* the tray's groups take what an earlier visit found */
+  char key[160]; scache_key(key, sizeof key); int e = scache_find(key); if (e < 0) return;
+  for (int i = 0; i < P.srcs.ng; i++) { __typeof__(P.srcs.g[0]) *g = &P.srcs.g[i];
+    for (int s = 0; s < scache[e].ng; s++) if (!strcmp(scache[e].g[s].name, g->name) && scache[e].g[s].n > 0) {
+      Stream *cp = malloc(sizeof(Stream) * (size_t)scache[e].g[s].n); if (!cp) break;
+      memcpy(cp, scache[e].g[s].items, sizeof(Stream) * (size_t)scache[e].g[s].n);
+      free(g->items); g->items = cp; g->n = scache[e].g[s].n;
+      free(g->h); g->h = calloc(g->n ? g->n : 1, sizeof(float)); g->st = 2; break; } }
+}
 static void on_src_part(StreamGroup *g, int gi, void *ud) { (void)gi; int k = P.open ? src_find((unsigned)(uintptr_t)ud) : -1; if (k < 0) { free(g->items); return; } /* a list for a tray since closed: dropped */
   free(P.srcs.g[k].items); free(P.srcs.g[k].h); P.srcs.g[k].items = g->items; P.srcs.g[k].n = g->n; P.srcs.g[k].h = calloc(g->n ? g->n : 1, sizeof(float)); /* the list is ours now; its rows measured once, as they come */
   if (!P.srcs.g[k].h) { free(g->items); P.srcs.g[k].items = NULL; P.srcs.g[k].n = 0; } }
 static void on_src_done(int total, void *ud) { (void)total; int k = P.open ? src_find((unsigned)(uintptr_t)ud) : -1; if (k < 0) return; P.srcs.g[k].tok = 0; P.srcs.g[k].st = P.srcs.g[k].n ? 2 : 3;
+  if (P.srcs.g[k].st == 2) scache_store(k); /* found sources stay for the session */
   __typeof__(P.srcs.g[0]) *g = &P.srcs.g[k]; int any = 0; for (int i = 0; i < g->n; i++) if (g->items[i].url[0]) any = 1;
   if (!any && g->open && !g->touched) { g->open = 0; g->leaving = g->seen; if (g->seen) mo_to(&g->fa, 0, .2f, C_EASE, 0); } /* nothing from it: its header alone, folded (opened again on OK) */
   else if (g->seen) { mo_set(&g->ia, 0); mo_to(&g->ia, 1, .24f, C_OUT, 0); } /* its rows fade in where the waiting ones were */
@@ -1096,6 +1126,7 @@ static void srcs_begin(const char *vid) {
   if (P.srcs.on && !strcmp(P.srcs.vid, vid)) return; srcs_free(); snprintf(P.srcs.vid, sizeof P.srcs.vid, "%s", vid); P.srcs.on = 1;
   char names[16][96]; int n = sb_stream_addons(P.type, vid, names, 16);
   for (int i = 0; i < n; i++) { snprintf(P.srcs.g[i].name, sizeof P.srcs.g[i].name, "%s", names[i][0] ? names[i] : T("Addon")); P.srcs.g[i].open = 1; } P.srcs.ng = n;
+  scache_install(); /* found earlier this session: already there, no asking again */
 }
 static int src_on(const Stream *s) { char info[700]; sb_stream_info(s, info, sizeof info); return !strcmp(s->url, P.url) || !strcmp(s->url, P.st.url) || !strcmp(s->url, P.alt) || (P.sname[0] && !strncmp(info, P.sname, 200) && !strcmp(s->addon, P.saddon)); }
 /* a stream row's height: its name (up to 3 lines) and its words (up to 6), each cut with an ellipsis past that */
@@ -1462,6 +1493,9 @@ static void dts_defer_tick(void) {
   if (listed && dv7_convert("known before loading")) return;
   video_load(P.url);
 }
+/* the volume, set with the mouse wheel while a film plays (persisted across starts) */
+static int playVol = -1;
+static void vol_ensure(void);
 static void start_video(void) {
   P.started = 1; P.isTrailer = !strcmp(P.type, "other"); P.isHls = strstr(P.url, ".m3u8") != NULL;
   best_caps_probe(NULL, NULL); /* (once: kept) */
@@ -1472,6 +1506,8 @@ static void start_video(void) {
   asssubs_close(); if (mkv) { mkv_close(mkv); mkv = NULL; }
   if (!P.isHls && !P.isTrailer && !strncmp(P.url, "http", 4)) mkv = mkv_open(P.url, P.startAt > 0 ? P.startAt : 0, P.isP2p); /* not Matroska: it gives up after one small read */
   load_ext_subs(0); load_addon_subs(0); load_emb_tracks();
+  if (!P.isTrailer && P.vid[0]) { srcs_begin(P.vid); for (int i = 0; i < P.srcs.ng; i++) src_ask(i); } /* the sources found while it plays: the tray shows them at once */
+  vol_ensure(); video_set_volume(playVol, 0); /* the remembered volume, not mpv's default */
 }
 static char nextAlt[SB_URL_MAX];
 void player_fallback(const char *url) { snprintf(nextAlt, sizeof nextAlt, "%s", url ? url : ""); }
@@ -1506,6 +1542,7 @@ static void roll_draw(float cx, float y, float lh, uint32_t col) {
     if (a) text_draw(a, mx, y - dy * (1 - t), 25, 600, col_alpha(col, t), 0, 0, ALIGN_CENTER); }
 }
 static void draw_osd(void); static void draw_tray(void);
+static void vol_ensure(void); static void draw_vol(void); void player_wheel(float dy);
 /* another source or episode from inside the player: the controls as they are on screen at that moment, taken ONCE as
    a picture, fade off as the controls do (.2 s) while the art comes back over them (.45 s); freed once gone */
 static GfxTarget handSnap; static Mo handA;
@@ -1558,6 +1595,7 @@ static void play_stream(const Stream *s, const char *vid, double startAt) {
   P.st = *s; snprintf(P.url, sizeof P.url, "%s", s->url); snprintf(P.alt, sizeof P.alt, "%s", nextAlt); nextAlt[0] = 0;
   if ((s->hdrs[0] || s->rhdrs[0]) && !strncmp(s->url, "http", 4)) { hproxy_url(s->url, s->hdrs, s->rhdrs, P.url, sizeof P.url); fprintf(stderr, "[player] the stream wants its own headers: through %s\n", P.url); } /* every request for it carries them */
   char info[700]; sb_stream_info(s, info, sizeof info); snprintf(P.sname, sizeof P.sname, "%s", info); snprintf(P.saddon, sizeof P.saddon, "%s", s->addon);
+  if (strncmp(s->url, "p2p://", 6)) p2p_note_direct_play(); /* a direct title evicts a kept torrent cache */
   if (!P.isTrailer && strcmp(P.type, "other")) sb_remember_stream(P.id, P.vid, s); /* the torrent itself, resolved again next time */
   if (!strncmp(P.url, "ytid:", 5)) { /* a YouTube video: found as the trailers are, behind the title art */
     P.resolving = 1; set_status(""); p2pTok++; P.ytTok = trailer_find(NULL, P.url + 5, 0, on_yt, (void *)(uintptr_t)p2pTok); return; }
@@ -1816,8 +1854,9 @@ void player_tick(float dt) {
   hand_tick(dt);
   subs_pump(); /* subtitle files and lists, fetched on their own threads */
   if (!P.open) return; video_pump(); sync_tick();
+  if (P.volA.v > 0.01f && now_() - P.volAt > 1.4) mo_to(&P.volA, 0, .3f, C_EASE, 0); /* the volume pill goes 1.4 s after the last change */
   css();
-  Mo *mo[] = { &P.pgA, &P.pgY, &P.in, &P.artA, &P.ttlA, &P.ttlX, &P.ttlY, &P.barA, &P.barY, &P.btnA, &P.btnY, &P.topR, &P.topY, &P.dim, &P.dimT, &P.vig, &P.pzA, &P.bufA, &P.lnA, &P.skA, &P.skS, &P.knA,
+  Mo *mo[] = { &P.pgA, &P.pgY, &P.in, &P.artA, &P.ttlA, &P.ttlX, &P.ttlY, &P.barA, &P.barY, &P.btnA, &P.btnY, &P.topR, &P.topY, &P.dim, &P.dimT, &P.vig, &P.pzA, &P.bufA, &P.lnA, &P.skA, &P.skS, &P.knA, &P.volA,
     &P.prA, &P.prY, &P.prB, &P.subB, &P.ccS, &P.dlyA, &P.dlyR, &P.p2pA, &P.focX, &P.focY, &P.focW, &P.focH, &P.focA, &P.tipA, &P.hvA, &P.tray.open, &P.tray.openA, &P.tray.rowX, &P.tray.tabsX, &P.tray.ringX, &P.tray.ringY, &P.tray.ringA, &RL.t };
   if (P.skA.v <= 0.001f && !P.skOn) RL.key[0] = 0; /* the pill gone: its next time shows at once */
   for (size_t i = 0; i < sizeof mo / sizeof *mo; i++) mo_tick(mo[i], dt);
@@ -2060,6 +2099,9 @@ static void draw_osd(void) {
   /* top right: the clock, the pages' own (a new minute: only its changed digits crossfade), and when it ends */
   if (P.topR.v > 0.001f) { gfx_opacity_push(P.topR.v); gfx_offset_push(0, P.topY.v);
     app_clock_draw(W - 64, 46, 1);
+#ifdef SB_LINUX
+    app_fsbtn_draw(W - 64, 46);
+#endif
     double d = dur(); if (d > 0) { time_t t = time(NULL) + (time_t)(d - video_time());
       static char s[64]; static long sMin = -1; static unsigned sLg; /* made again when its minute or the language changes */
       if ((long)(t / 60) != sMin || sLg != i18n_gen()) { sMin = (long)(t / 60); sLg = i18n_gen(); struct tm tm; localtime_r(&t, &tm); char e[16]; snprintf(e, sizeof e, "%02d:%02d", tm.tm_hour, tm.tm_min); snprintf(s, sizeof s, "%s", T1("Ends at {t}", "t", e)); text_upper(s, sizeof s); }
@@ -2354,6 +2396,7 @@ void player_draw(void) {
   if (P.live && P.artA.v < 0.999f) { draw_osd(); draw_tray(); }
   else if (P.artA.v < 0.999f) hand_draw();
   draw_art();
+  draw_vol();
   gfx_opacity_pop();
 }
 static void chapters_hook(const char *url, int p2p) { (void)url; (void)p2p; P.chapWant = 1; }
@@ -2391,8 +2434,38 @@ static void ptr_tray(float x, float y, int down) {
     if (P.tray.idx != i || P.tray.zone != 0 || P.tray.onBtn) { P.tray.idx = i; P.tray.zone = 0; P.tray.onBtn = 0; }
     if (down) choose(it); return; }
 }
-void player_ptr(int type, float x, float y) {
-  if (!P.open || P.closing || !P.live) return; /* the art is up (resolving): nothing to point at */
+/* the volume, set with the mouse wheel while a film plays (persisted across starts) */
+static void vol_ensure(void) { if (playVol < 0) { playVol = atoi(store_get("playVol", "100")); if (playVol < 0) playVol = 0; if (playVol > 100) playVol = 100; } }
+void player_wheel(float dy) {
+  if (!P.open || P.closing || !P.live) return;
+  vol_ensure();
+  int v = playVol + (dy > 0 ? 5 : -5); if (v < 0) v = 0; if (v > 100) v = 100;
+  if (v == playVol) return; playVol = v;
+  char b[16]; snprintf(b, sizeof b, "%d", v); store_set("playVol", b);
+  video_set_volume(v, 0); P.volAt = now_(); mo_to(&P.volA, 1, .15f, C_EASE, 0);
+}
+static void draw_vol(void) { /* the volume pill, bottom centre over everything, only while changing */
+  float a = P.volA.v; if (a <= 0.001f) return;
+  float w = 440, h = 84, x = SB_W / 2 - w / 2, y = SB_H - 320;
+  gfx_opacity_push(a);
+  lglass_shell(x, y, w, h, 42, RGBA(10, 12, 22, 150), 1); gfx_ring(x, y, w, h, 42, 1, WHITE_A(60));
+  icon_draw("p_spk", x + 26, y + 22, 40, WHITE_A(230));
+  float bx = x + 82, bw = 196, bh = 8, by = y + h / 2 - 4;
+  gfx_rrect(bx, by, bw, bh, 4, WHITE_A(40));
+  if (playVol > 0) gfx_rrect(bx, by, bw * playVol / 100.0f, bh, 4, ACC2);
+  char t[16]; snprintf(t, sizeof t, "%d", playVol < 0 ? 100 : playVol);
+  text_draw(t, bx + bw + 16, y + (h - text_line_height(28)) / 2, 28, 700, WHITE_A(255), 0, 0, ALIGN_LEFT);
+  gfx_opacity_pop();
+}
+/* the focused button opens into a pill with its name (foc_update): clicks land on the
+   drawn pill, not just the 78px icon square, or the label half pauses instead of acting */
+static int btn_foc(void) { int fi = P.bIdx; if (P.mode == 2 && P.tray.kind) { int ak = P.tray.kind < 0 ? -P.tray.kind : P.tray.kind; int b = btn_index(ak == 1 || ak == 5 ? "eps" : ak == 2 ? "src" : ak == 3 ? "aud" : "subs"); if (b >= 0) fi = b; } return fi; }
+static int btn_hit(int i, float x) {
+  if (x >= P.btns[i].x && x <= P.btns[i].x + P.btns[i].w) return 1;
+  if (i == btn_foc() && P.focA.v > 0.02f && x >= P.focX.v && x <= P.focX.v + P.focW.v) return 1;
+  return 0;
+}
+void player_ptr(int type, float x, float y) {  if (!P.open || P.closing || !P.live) return; /* the art is up (resolving): nothing to point at */
   float L25 = text_line_height(25), barTop = SB_H - 54 - 94 - 30 - L25; /* the bar's row, its times included (the track alone is a few pixels high) */
   int onBar = y >= barTop && y <= barTop + L25, onBtns = y >= SB_H - 54 - 94 && y <= SB_H - 54;
   if (type == 2) { if (P.barDown && onBar) { ptr_hv(1, x); double d = dur(); if (d > 0) { P.seekT = P.hvP * d; commit_seek(); } } P.barDown = 0; return; } /* the bar seeks on release, where the pointer is then */
@@ -2403,14 +2476,17 @@ void player_ptr(int type, float x, float y) {
   if (P.mode == 2) {
     if (PG.tray && in_box(x, y, PG.x, PG.y, PG.w, PG.h)) { ptr_tray(x, y, down); return; }
     if (down) { int ak = P.tray.kind < 0 ? -P.tray.kind : P.tray.kind, ob = btn_index(ak == 1 || ak == 5 ? "eps" : ak == 2 ? "src" : ak == 3 ? "aud" : "subs"); close_tray();
-      if (onBtns) for (int i = 0; i < P.nbtn; i++) if (i != ob && x >= P.btns[i].x && x <= P.btns[i].x + P.btns[i].w) { P.row = 0; P.bIdx = i; act(P.btns[i].id); break; } }
+      if (onBtns) for (int i = 0; i < P.nbtn; i++) if (i != ob && btn_hit(i, x)) { P.row = 0; P.bIdx = i; act(P.btns[i].id); break; } }
     return; }
   if (P.prompt.k && PG.prompt) { /* skip intro / recap, the next-up card (all of it) */
     int pi = -1; if (PG.card) { if (in_box(x, y, PG.prX[0], PG.prY[0], PG.prW[0], PG.prH[0])) pi = P.prompt.nbtn - 1; }
     else for (int i = 0; i < PG.npr && i < P.prompt.nbtn; i++) if (in_box(x, y, PG.prX[i], PG.prY[i], PG.prW[i], PG.prH[i])) pi = i;
     if (pi >= 0) { if (P.mode != 3 || P.prompt.idx != pi) { if (P.mode == 0) show_osd(1); P.mode = 3; P.prompt.idx = pi; } ptr_hv(0, x); if (down) prompt_go(pi); return; } }
   if (P.mode == 0 || P.mode == 3) { if (P.mode == 3) P.mode = 0; show_osd(1); } else arm_hide(); /* moving brings the controls */
-  if (onBtns) for (int i = 0; i < P.nbtn; i++) if (x >= P.btns[i].x && x <= P.btns[i].x + P.btns[i].w) { if (P.row != 0 || P.bIdx != i) { P.row = 0; P.bIdx = i; } ptr_hv(0, x); if (down) act(P.btns[i].id); return; }
+#ifdef SB_LINUX
+  if (down && P.topR.v > 0.5f && app_fsbtn_hit(SB_W - 64, 46 + P.topY.v, x, y)) { app_toggle_fullscreen(); return; } /* the fullscreen button by the clock */
+#endif
+  if (onBtns) for (int i = 0; i < P.nbtn; i++) if (btn_hit(i, x)) { if (P.row != 0 || P.bIdx != i) { P.row = 0; P.bIdx = i; } ptr_hv(0, x); if (down) act(P.btns[i].id); return; }
   if (onBar) { if (P.row != 1) P.row = 1; ptr_hv(1, x); if (down) P.barDown = 1; return; } /* the bar, its times included */
   ptr_hv(0, x);
   if (down) { if (P.seekT >= 0) commit_seek(); else toggle(); show_osd(1); } /* the picture: play / pause */

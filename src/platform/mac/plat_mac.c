@@ -55,3 +55,6 @@ void plat_luna_cancel(unsigned long handle) { (void)handle; }
 void plat_luna_pump(void) {}
 int plat_luna_send(const char *uri, const char *payload) { (void)uri; (void)payload; return 0; }
 int plat_panel_lines(void) { return 0; }
+
+int plat_fullscreen(void) { return 0; }
+void plat_set_fullscreen(int on) { (void)on; }

@@ -1,4 +1,5 @@
 #include "core/app.h"
+#include "platform/plat.h"
 #include "core/bgtrailer.h"
 #include "core/best.h"
 #include "core/keys.h"
@@ -305,7 +306,34 @@ void app_clock_draw(float right, float y, float alpha) {
     gfx_opacity_push(k); text_draw(clockTxt + n, x0 + pw, y + 5 * (1 - k), 38, 600, WHITE_A(230), -0.6f, 0, ALIGN_LEFT); gfx_opacity_pop(); }
   if (alpha < 1) gfx_opacity_pop();
 }
-static void clock_draw(void) { float W = text_width("00:00", 38, 600, -0.6f); clockLiquid = 1; app_clock_draw(app_rtl() ? 48 + W : SB_W - 48, 50 - 22, 1); clockLiquid = 0; }
+#ifdef SB_LINUX
+void app_fsbtn_draw(float right, float y);
+#endif
+static void clock_draw(void) { float W = text_width("00:00", 38, 600, -0.6f); clockLiquid = 1; float right = app_rtl() ? 48 + W : SB_W - 48; app_clock_draw(right, 50 - 22, 1); clockLiquid = 0;
+#ifdef SB_LINUX
+  app_fsbtn_draw(right, 50 - 22);
+#endif
+}
+#ifdef SB_LINUX
+/* the fullscreen button (desktop): a glass circle on the clock's centre side, expand / compress icon
+   for the state. Drawn everywhere the clock is; the player handles its clicks itself (player_ptr). */
+void app_fsbtn_geom(float right, float y, float *x, float *yy) {
+  static float W; if (W <= 0) W = text_width("00:00", 38, 600, -0.6f);
+  float px = right - W - 26, pw = W + 52; /* the clock pill, as in app_clock_draw */
+  float bx = px + pw / 2 >= SB_W / 2 ? px - 16 - 76 : px + pw + 16; /* its centre side, never off-screen */
+  if (x) *x = bx; if (yy) *yy = y + text_line_height(38) / 2 - 38;
+}
+static void fs_act(int a, int b) { (void)a; (void)b; app_toggle_fullscreen(); }
+void app_toggle_fullscreen(void) { plat_set_fullscreen(!plat_fullscreen()); }
+int app_fsbtn_hit(float right, float y, float x, float yy) { float bx, by; app_fsbtn_geom(right, y, &bx, &by); return x >= bx && x < bx + 76 && yy >= by && yy < by + 76; }
+void app_fsbtn_draw(float right, float y) {
+  float bx, by; app_fsbtn_geom(right, y, &bx, &by);
+  lglass_light(lg_drift_at(171.0f)); lglass_shell(bx, by, 76, 76, 38, RGBA(14, 14, 22, 120), 0.85f); lglass_light(0);
+  gfx_ring(bx, by, 76, 76, 38, 1, WHITE_A(46));
+  icon_draw(plat_fullscreen() ? "desk_restore" : "desk_full", bx + 18, by + 18, 40, WHITE_A(210));
+  hit_act(bx, by, 76, 76, fs_act, 0, 0);
+}
+#endif
 
 /* ---- the top bar: centred tabs, the corner icons, one pill that glides to the focused tab ---- */
 TopNav topNav = { .idx = NAV_HOME };
@@ -807,8 +835,11 @@ void app_pointer_button(int down, float x, float y) {
   if (dn == 1) { key_core(K_OK, 0, 0); return; }
   const Hit *d = hit_at(x, y); if (d && hit_same(d, &PTR.act)) PTR.act.act(PTR.act.a, PTR.act.b); /* released on it: its own action */
 }
-/* the wheel = the Up/Down arrows (Left/Right for a sideways wheel), one per notch; it leaves the pointer out */
-void app_pointer_wheel(float dx, float dy) { double now = NOW; if (saver_on()) return; if (now - PTR.wheelAt < PTR_WHEEL || (!dx && !dy)) return; PTR.wheelAt = now; idle_touch(); int k = dy > 0 ? K_UP : dy < 0 ? K_DOWN : dx > 0 ? K_RIGHT : K_LEFT; key_core(app_mirror_key(k), 1, 0); key_core(k, 0, 0); }
+/* the wheel = the Up/Down arrows (Left/Right for a sideways wheel), one per notch; it leaves the pointer out.
+   In the player it is the volume instead (shown only while changing): Up louder, Down quieter */
+void app_pointer_wheel(float dx, float dy) { double now = NOW; if (saver_on()) return; if (now - PTR.wheelAt < PTR_WHEEL || (!dx && !dy)) return; PTR.wheelAt = now; idle_touch();
+  if (player_open() && dy) { extern void player_wheel(float dy); player_wheel(dy); return; }
+  int k = dy > 0 ? K_UP : dy < 0 ? K_DOWN : dx > 0 ? K_RIGHT : K_LEFT; key_core(app_mirror_key(k), 1, 0); key_core(k, 0, 0); }
 void app_pointer_system(int show) { if (!show) { ptr_hide(); return; } if (PTR.arrowHid) return; ptr_show(); }
 void app_key(int k, int down, int repeat) {
   if (k == K_CURSOR_SHOW || k == K_CURSOR_HIDE) { if (down) app_pointer_system(k == K_CURSOR_SHOW); return; } /* a notice from the TV, not a key */

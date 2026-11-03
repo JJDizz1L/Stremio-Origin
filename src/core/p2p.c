@@ -54,7 +54,7 @@ static char stateDir[1024], cacheDir[1024];
 static double idleSince; /* seconds: the engine stops some minutes after the last torrent went */
 
 /* what the TV has, read when the engine starts, and what was chosen from it */
-enum { LOC_FLASH, LOC_RAM, LOC_DISK, LOC_USB };
+enum { LOC_FLASH, LOC_RAM, LOC_DISK, LOC_USB, LOC_CACHE };
 typedef struct {
   int memTotal, memFree, cpus, tier;           /* MB, MB, cores, 0 small 1 medium 2 large */
   int loc; char root[1024];                    /* where the window lives */
@@ -65,10 +65,35 @@ typedef struct {
   long seg; char usbMnt[512], usbFs[24];       /* MB per segment file (0: holes); the USB drive in use */
 } Prof;
 static Prof PF;
-static const char *loc_name(int l) { return l == LOC_FLASH ? "flash" : l == LOC_RAM ? "memory" : l == LOC_USB ? "usb" : "disk"; }
+static const char *loc_name(int l) { return l == LOC_FLASH ? "flash" : l == LOC_RAM ? "memory" : l == LOC_USB ? "usb" : l == LOC_CACHE ? "cache" : "disk"; }
 /* a move of the window to another place, worked out on a thread and applied by p2p_pump */
 static int relocating; static volatile int relocReady; static Prof relocTo; static double relocAt, relocLook; static unsigned relocSerial;
 
+static void rm_tree(const char *dir);
+/* the kept local cache ("Cache torrents locally"): the last torrent's payload, held on disk after
+   the player closes and reused when the same torrent plays again. Evicted when a different title
+   plays (any torrent or direct stream), when the setting goes off, and on exit. */
+static char keptIh[41], keptRoot[1024];
+static long cache_mb(void) { long m = atol(store_get("p2pCacheMB", "0")); return m == 512 || m == 1024 || m == 2048 ? m : 0; } /* the setting's size, else off */
+static void cache_root(char *o, size_t n) {
+  const char *e = getenv("SB_P2P_CACHE"); if (e && e[0]) { snprintf(o, n, "%s/engine", e); return; }
+  const char *xdg = getenv("XDG_CACHE_HOME"); char base[1024];
+  if (xdg && xdg[0]) snprintf(base, sizeof base, "%s", xdg);
+  else { const char *h = getenv("HOME"); if (h && h[0]) snprintf(base, sizeof base, "%s/.cache", h); else snprintf(base, sizeof base, "%s/cache", store_data_dir()); }
+  snprintf(o, n, "%s/StremioOrigin/engine", base);
+}
+static void mkpath(char *dir) { /* mkdir -p for usable_dir's single-level parent step */
+  for (char *p = dir + 1; *p; p++) if (*p == '/') { *p = 0; mkdir(dir, 0755); *p = '/'; }
+  mkdir(dir, 0755);
+}
+static void evict_kept(void) { /* the kept cache goes now (a different title plays, the setting went off) */
+  if (!keptRoot[0]) { keptIh[0] = 0; return; }
+  rm_tree(keptRoot); rmdir(keptRoot); keptRoot[0] = 0; keptIh[0] = 0;
+  fprintf(stderr, "[p2p] local cache evicted\n");
+}
+static void kept_invalidate(const char *ih) { /* that torrent's payload was deleted by the engine: no cache of it left */
+  if (ih && ih[0] && !strcmp(keptIh, ih)) { keptRoot[0] = 0; keptIh[0] = 0; }
+}
 /* the one torrent being resolved / played */
 static struct { int on; char ih[41], magnet[4096]; int want; uint32_t idx; uint64_t size; double t0; P2pCb cb; void *ud; char status[256]; int stage; } R;
 /* the active one, for stats, pacing and the reason line */
@@ -154,8 +179,8 @@ static long ram_free_now(const char *root) { long m = plat_mem_free_mb(); long t
 /* the window a film wants: about 40 s in front at its bitrate, the same again for the trims' slack, plus head, tail
    and a short look-behind (see the engine's window split) */
 static long want_window(double bps) { if (bps <= 0) bps = 1 * MB; long w = (long)(2.2 * bps * 40 / MB) + 32; return w; }
-static long want_for(const Prof *P, double bps, uint64_t size) { /* a USB drive: the whole film (seeks back and forth stay on it) */
-  if (P->loc == LOC_USB) return size ? (long)(size / MB) + 64 : P->wmax; return want_window(bps); }
+static long want_for(const Prof *P, double bps, uint64_t size) { /* a USB drive or the local cache: the whole film (seeks back and forth stay on it) */
+  if (P->loc == LOC_USB || P->loc == LOC_CACHE) { long w = size ? (long)(size / MB) + 64 : P->wmax; return w > P->wmax ? P->wmax : w; } return want_window(bps); }
 static long clamp_in(const Prof *P, long want, long room) {
   long w = want; if (w > P->wmax) w = P->wmax; if (w > room) w = room; if (w < W_FLOOR) w = W_FLOOR; return w;
 }
@@ -180,6 +205,17 @@ static void choose_profile(Prof *P) {
       fprintf(stderr, "[p2p] window in usb %s (%s%s), %ld MB free, %ld MB now, up to %ld MB\n", P->root, d.fs, P->seg ? ", 16 MB segment files" : "", uf, P->window, P->budget);
       return; }
     fprintf(stderr, "[p2p] usb %s not usable now (%ld MB free)\n", d.mnt, uf); }
+  /* the local cache ("Cache torrents locally"): up to the setting's MB on disk, kept between plays */
+  { long mb = cache_mb();
+    if (mb > 0) { char cr[1024]; cache_root(cr, sizeof cr); mkpath(cr);
+      if (usable_dir(cr)) { long cf = free_mb(cr), res = 64, bud = cf < 0 ? -1 : cf - res; if (bud > mb) bud = mb;
+        if (bud >= W_GOOD) {
+          P->loc = LOC_CACHE; snprintf(P->root, sizeof P->root, "%s", cr); P->budget = bud; P->reserve = cf - bud; P->wmax = mb;
+          P->seg = 0; /* usable_dir already proved hole punching: the torrent's own files */
+          P->target = want_for(P, 0, 0); P->window = clamp_in(P, P->target, P->budget);
+          fprintf(stderr, "[p2p] window in cache %s, %ld MB free, %ld MB now, up to %ld MB\n", P->root, cf, P->window, bud);
+          return; }
+        fprintf(stderr, "[p2p] local cache %s not usable now (%ld MB free)\n", cr, cf); } } }
   /* the candidates */
   char fr[1024], tr[1024], sr[1024]; flash_root(fr, sizeof fr); tmp_root(tr, sizeof tr, 0); tmp_root(sr, sizeof sr, 1);
   int fOk = usable_dir(fr); long fFree = fOk ? free_mb(fr) : -1, fRes = flash_reserve(), fBud = fFree < 0 ? -1 : fFree - fRes;
@@ -244,7 +280,10 @@ static void *engine_start(void *a) { plat_thread_background(5); (void)a; /* libt
   choose_profile(&PF);
   snprintf(cacheDir, sizeof cacheDir, "%s", PF.root);
   snprintf(stateDir, sizeof stateDir, "%s/cache/engine-state", store_data_dir());
-  rm_tree(cacheDir); mkdir(cacheDir, 0755); { char c[1100]; snprintf(c, sizeof c, "%s/cache", store_data_dir()); mkdir(c, 0755); } mkdir(stateDir, 0755); /* the DHT table stays between runs */
+  int reuse = keptIh[0] && R.ih[0] && !strcmp(R.ih, keptIh) && !strcmp(cacheDir, keptRoot); /* the same torrent again: its files are still there */
+  if (reuse) { fprintf(stderr, "[p2p] reusing local cache for %s\n", R.ih); mkdir(cacheDir, 0755); }
+  else rm_tree(cacheDir); mkdir(cacheDir, 0755); { char c[1100]; snprintf(c, sizeof c, "%s/cache", store_data_dir()); mkdir(c, 0755); } mkdir(stateDir, 0755); /* the DHT table stays between runs */
+  if (!reuse && keptRoot[0]) evict_kept(); /* anything kept is gone now (wiped above, or another place) */
   int r = E->start(stateDir, cacheDir, (uint64_t)PF.window * MB, upload_bps(), mem_cache_bytes(), (uint64_t)PF.seg * MB);
   if (r) { snprintf(engErr, sizeof engErr, "%s", E->error(NULL)); ENG_SET(ENG_FAILED); return NULL; }
   apply_memory_settings();
@@ -254,10 +293,13 @@ static void *engine_start(void *a) { plat_thread_background(5); (void)a; /* libt
   return NULL;
 }
 static void *engine_stop(void *a) { (void)a; E->stop(); rm_tree(cacheDir); rmdir(cacheDir); ENG_SET(ENG_OFF); return NULL; }
+/* the engine parked with a kept cache: stopped, but the payload stays on disk for the next play */
+static void *engine_park(void *a) { (void)a; E->stop(); ENG_SET(ENG_OFF); fprintf(stderr, "[p2p] engine parked, local cache kept in %s\n", cacheDir); return NULL; }
 /* left-overs of a run that did not end well (a crash, the TV switched off): in RAM they would hold memory until the
    TV restarts. Swept once at start, on a thread */
 static void *sweep(void *a) { (void)a; plat_thread_background(15);
   char p[1024]; flash_root(p, sizeof p); rm_tree(p); tmp_root(p, sizeof p, 0); rm_tree(p); rmdir(p); tmp_root(p, sizeof p, 1); rm_tree(p); rmdir(p);
+  cache_root(p, sizeof p); rm_tree(p); rmdir(p); /* a kept cache from a run that never exited cleanly */
   for (int i = 0; i < 2; i++) { struct stat st; const char *old = i ? "/dev/shm/sb-engine" : "/tmp/sb-engine"; /* the shared name earlier versions used, when it is ours */
     if (!lstat(old, &st) && S_ISDIR(st.st_mode) && st.st_uid == geteuid()) { rm_tree(old); rmdir(old); } }
   __atomic_store_n(&cleaning, 0, __ATOMIC_RELEASE); return NULL; }
@@ -313,6 +355,7 @@ void p2p_resolve(const char *url, P2pCb cb, void *ud) {
   /* p2p://<ih>/<idx>?tr=<encoded>&tr=... */
   const char *p = url + 6; int n = 0; while (n < 40 && isxdigit((unsigned char)p[n])) { R.ih[n] = (char)tolower((unsigned char)p[n]); n++; }
   R.ih[n] = 0; if (n != 40) { R.on = 1; fail(T("Couldn’t start the torrent engine")); return; }
+  if (keptIh[0] && strcmp(keptIh, R.ih)) evict_kept(); /* another torrent now: the kept cache makes room */
   p += 40; R.want = -1; if (*p == '/') { p++; if (isdigit((unsigned char)*p)) R.want = atoi(p); }
   int m = snprintf(R.magnet, sizeof R.magnet, "magnet:?xt=urn:btih:%s", R.ih);
   const char *q = strchr(url, '?');
@@ -328,7 +371,9 @@ void p2p_resolve(const char *url, P2pCb cb, void *ud) {
   R.on = 1; R.stage = 0; R.status[0] = 0;
   if (ensure_engine()) fail(T("Couldn’t start the torrent engine"));
 }
-void p2p_cancel(void) { if (!R.on) return; R.on = 0; R.status[0] = 0; R.cb = NULL; if (E && ENG() == ENG_ON) E->remove(R.ih); idleSince = now_s(); }
+void p2p_cancel(void) { if (!R.on) return; R.on = 0; R.status[0] = 0; R.cb = NULL; if (E && ENG() == ENG_ON) E->remove(R.ih); kept_invalidate(R.ih); idleSince = now_s(); }
+/* a direct (non-torrent) title starts: the kept torrent cache makes room for it */
+void p2p_note_direct_play(void) { evict_kept(); }
 const char *p2p_status(void) { return R.on ? R.status : ""; }
 
 static int is_video(const char *n) { const char *d = strrchr(n, '.'); if (!d) return 0; static const char *ext[] = { ".mp4", ".mkv", ".avi", ".ts", ".m4v", ".webm", ".mov" };
@@ -350,7 +395,7 @@ int p2p_peer_line(char *out, int cap) {
   if (!E || ENG() != ENG_ON || !A.ih[0]) return 0;
   sbe_stats st; memset(&st, 0, sizeof st); if (E->stats(&st) || !st.peers) return 0;
   char sp[64], pe[16]; fmt_rate(A.rate, sp, sizeof sp); snprintf(pe, sizeof pe, "%u", st.peers);
-  snprintf(out, cap, "%s  ·  %s%s", T1("{n} peers", "n", pe), sp, PF.loc == LOC_USB ? "  ·  USB" : ""); /* the buffer on the USB drive: said after the speed */
+  snprintf(out, cap, "%s  ·  %s%s", T1("{n} peers", "n", pe), sp, PF.loc == LOC_USB ? "  ·  USB" : PF.loc == LOC_CACHE ? "  ·  cache" : ""); /* the buffer on the USB drive or in the local cache: said after the speed */
   return 1;
 }
 
@@ -434,13 +479,23 @@ const char *p2p_wait_reason(int waiting) {
 
 void p2p_shutdown(void) {
   usb_shutdown();
+  evict_kept(); /* wipe on exit: the local cache never survives a restart */
   if (!E) return;
   for (int i = 0; i < 300 && (ENG() == ENG_STARTING || ENG() == ENG_STOPPING); i++) SDL_Delay(10); /* a start or stop under way ends first (3 s at most) */
   if (ENG() == ENG_ON) { Uint32 t0 = SDL_GetTicks(); E->remove_all(); /* no torrent state left behind */ E->stop(); rm_tree(cacheDir); rmdir(cacheDir); ENG_SET(ENG_OFF); fprintf(stderr, "[p2p] engine stopped at exit in %u ms\n", SDL_GetTicks() - t0); }
 }
 void p2p_player_closed(void) {
   if (R.on) p2p_cancel();
+  if (E && ENG() == ENG_ON && cache_mb() > 0 && A.ih[0] && PF.loc == LOC_CACHE) {
+    /* kept for the next play of this torrent: the engine stops, the payload stays */
+    snprintf(keptIh, sizeof keptIh, "%s", A.ih); snprintf(keptRoot, sizeof keptRoot, "%s", cacheDir);
+    memset(&A, 0, sizeof A); idleSince = 0; ENG_SET(ENG_STOPPING);
+    pthread_t th; if (!pthread_create(&th, NULL, engine_park, NULL)) { pthread_detach(th); return; }
+    ENG_SET(ENG_ON); E->remove_all(); evict_kept(); idleSince = now_s(); /* the park never started: fall back to deleting */
+    return;
+  }
   if (E && ENG() == ENG_ON) E->remove_all(); /* the engine deletes each torrent's payload with it */
+  evict_kept(); /* the setting is off (or nothing cached there): nothing stays behind */
   memset(&A, 0, sizeof A); idleSince = now_s();
 }
 void p2p_pump(void) {
@@ -460,11 +515,11 @@ void p2p_pump(void) {
   snprintf(R.status, sizeof R.status, "%s", p2p_wait_reason(1)); /* the art's line: nothing while it is quick, then why it is slow */
   if (R.stage == 1) {
     static sbe_file files[512]; int n = E->files(R.ih, files, 512);
-    if (n == -2) { fprintf(stderr, "[p2p] %s: %s\n", R.ih, E->error(R.ih)); E->remove(R.ih); fail(T("No peers found for this torrent")); return; }
+    if (n == -2) { fprintf(stderr, "[p2p] %s: %s\n", R.ih, E->error(R.ih)); E->remove(R.ih); kept_invalidate(R.ih); fail(T("No peers found for this torrent")); return; }
     if (n < 0) return; /* no file list yet: it keeps looking, the line says so */
     if (n > 512) n = 512;
     int idx = pick_file(files, n, R.want);
-    if (idx < 0) { fprintf(stderr, "[p2p] %s: file #%d is not a video of this torrent's %d file(s)\n", R.ih, R.want, n); E->remove(R.ih); fail(T("The file isn’t in this torrent pack")); return; }
+    if (idx < 0) { fprintf(stderr, "[p2p] %s: file #%d is not a video of this torrent's %d file(s)\n", R.ih, R.want, n); E->remove(R.ih); kept_invalidate(R.ih); fail(T("The file isn’t in this torrent pack")); return; }
     R.idx = (uint32_t)idx; R.size = files[idx].size; R.stage = 2;
     snprintf(A.ih, sizeof A.ih, "%s", R.ih); A.size = R.size; A.lastWatch = 0;
     { double est = (double)R.size / 5400.0; if (est < 0.4 * MB) est = 0.4 * MB; if (est > 6.0 * MB) est = 6.0 * MB; window_follow(est); } /* a guess from the size (a 90-minute film) until the player knows the length */

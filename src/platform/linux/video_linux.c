@@ -27,9 +27,23 @@ static int curAud = -1, curTxt = -1;
 static int surfW = 1920, surfH = 1080;
 static int winX = 0, winY = 0, winW = 1920, winH = 1080;
 static int cropOn = 0, cropSX = 0, cropSY = 0, cropSW = 0, cropSH = 0;
-static char cropCur[128] = ""; /* last video-crop sent to mpv: only re-sent when the aspect changes */
+static int propCrop = -1; /* video-crop as mpv has it (1/0): always cleared, set on change only */
+#include <math.h>
 static int timedDur = 0;
 static unsigned pumpN = 0;
+static GfxTarget vidT; /* the frame, rendered by mpv at exactly the video rect's size, composited as one UI quad */
+static double cacheAhead = 0; /* seconds mpv holds ahead of the playhead (demuxer-cache-duration) */
+static int seeking = 0;       /* mpv's seeking flag: a seek asked, not yet done */
+static double vFrom = 100, vTo = 100, vT0 = 0, vDur = 0; /* a volume fade in flight */
+static int timedOn = 0; static char timedBase[4096]; static double timedOff = 0; /* one continuous conversion: seeks reload base?t= */
+static double now_s(void) { return SDL_GetTicks() / 1000.0; }
+static void vol_apply(double v) { if (!mpvH) return; mpv_set_property(mpvH, "volume", MPV_FORMAT_DOUBLE, &v); }
+static void vol_fade_tick(void) {
+  if (vDur <= 0 || !mpvH) return;
+  double k = (now_s() - vT0) / vDur;
+  if (k >= 1) { vDur = 0; vol_apply(vTo); return; }
+  k = k * k * (3 - 2 * k); vol_apply(vFrom + (vTo - vFrom) * k);
+}
 
 static void *get_proc_address(void *ctx, const char *name) { (void)ctx; return SDL_GL_GetProcAddress(name); }
 
@@ -42,7 +56,7 @@ static void update_tracks(void) {
     for (int i = 0; i < node.u.list->num; i++) {
       mpv_node *t = &node.u.list->values[i];
       if (t->format != MPV_FORMAT_NODE_MAP || !t->u.list) continue;
-      const char *type = NULL; int id = 0; int selected = 0; const char *lang = NULL; const char *title = NULL; int channels = 0;
+      const char *type = NULL; int id = 0; int selected = 0; const char *lang = NULL; const char *title = NULL; const char *codec = NULL; int channels = 0;
       for (int k = 0; k < t->u.list->num; k++) {
         const char *key = t->u.list->keys[k];
         mpv_node *v = &t->u.list->values[k];
@@ -51,6 +65,7 @@ static void update_tracks(void) {
         else if (!strcmp(key, "selected") && v->format == MPV_FORMAT_FLAG) selected = v->u.flag;
         else if (!strcmp(key, "lang") && v->format == MPV_FORMAT_STRING) lang = v->u.string;
         else if (!strcmp(key, "title") && v->format == MPV_FORMAT_STRING) title = v->u.string;
+        else if (!strcmp(key, "codec") && v->format == MPV_FORMAT_STRING) codec = v->u.string;
         else if (!strcmp(key, "demux-channel-count") && v->format == MPV_FORMAT_INT64) channels = (int)v->u.int64;
       }
       if (!type) continue;
@@ -60,6 +75,7 @@ static void update_tracks(void) {
         tr->idx = id;
         snprintf(tr->lang, sizeof tr->lang, "%s", lang ? lang : "");
         snprintf(tr->name, sizeof tr->name, "%s", title ? title : (lang ? lang : "audio"));
+        snprintf(tr->codec, sizeof tr->codec, "%s", codec ? codec : "");
         tr->channels = channels > 0 ? channels : 2;
         if (selected) curAud = naud - 1;
       } else if (!strcmp(type, "sub") && ntxt < 24) {
@@ -98,6 +114,14 @@ static void process_events(void) {
         }
         break;
       }
+      case MPV_EVENT_LOG_MESSAGE: {
+        mpv_event_log_message *m = ev->data; /* mpv's own warnings/errors, for the player's status line */
+        if (m && m->text && (!strcmp(m->level, "error") || !strcmp(m->level, "fatal"))) {
+          snprintf(errBuf, sizeof errBuf, "%.200s", m->text);
+          size_t L = strlen(errBuf); while (L && (errBuf[L - 1] == '\n' || errBuf[L - 1] == ' ')) errBuf[--L] = 0;
+        }
+        break;
+      }
       default: break;
     }
   }
@@ -107,7 +131,7 @@ static void process_events(void) {
     if (mpv_get_property(mpvH, "time-pos", MPV_FORMAT_DOUBLE, &t) == 0) pos = t;
     double d;
     if (mpv_get_property(mpvH, "duration", MPV_FORMAT_DOUBLE, &d) == 0 && d > 0) dur = d;
-    if (timedDur > 0 && dur <= 0) dur = timedDur;
+    if (timedDur > 0 && (dur <= 0 || timedOn)) dur = timedDur; /* conversions report their own length */
     int p;
     if (mpv_get_property(mpvH, "pause", MPV_FORMAT_FLAG, &p) == 0) {
       if (p && st == VID_PLAYING) st = VID_PAUSED;
@@ -121,7 +145,11 @@ static void process_events(void) {
     if (mpv_get_property(mpvH, "height", MPV_FORMAT_INT64, &h) == 0) vh = (int)h;
     double f;
     if (mpv_get_property(mpvH, "container-fps", MPV_FORMAT_DOUBLE, &f) == 0 && f > 0) fpsv = f;
+    else if (fpsv <= 0 && mpv_get_property(mpvH, "estimated-vf-fps", MPV_FORMAT_DOUBLE, &f) == 0 && f > 0) fpsv = f;
   }
+  { double cb; if (mpv_get_property(mpvH, "demuxer-cache-duration", MPV_FORMAT_DOUBLE, &cb) == 0 && cb >= 0) cacheAhead = cb; } /* seconds buffered ahead */
+  { int s; if (mpv_get_property(mpvH, "seeking", MPV_FORMAT_FLAG, &s) == 0) seeking = s; }
+  vol_fade_tick();
 }
 
 int video_init(const char *appId) {
@@ -147,16 +175,19 @@ int video_init(const char *appId) {
 void video_load(const char *u) {
   if (!mpvH) return;
   snprintf(urlBuf, sizeof urlBuf, "%s", u);
-  st = VID_LOADING; liveFlag = 0; pos = 0; dur = 0; naud = 0; ntxt = 0; curAud = -1; curTxt = -1; cropOn = 0; cropCur[0] = 0; timedDur = 0;
+  st = VID_LOADING; liveFlag = 0; pos = 0; dur = 0; naud = 0; ntxt = 0; curAud = -1; curTxt = -1; cropOn = 0; timedDur = 0;
+  timedOn = 0; timedBase[0] = 0; timedOff = 0; cacheAhead = 0; seeking = 0;
   const char *cmd[] = {"loadfile", urlBuf, "replace", NULL};
   mpv_command(mpvH, cmd);
   mpv_set_property_string(mpvH, "sid", "no"); /* in case a previous file left a subtitle selected */
 }
 
 void video_load_timed(const char *base, double durSec) {
-  char u[8192];
-  snprintf(u, sizeof u, "%s?t=0", base);
+  if (!mpvH) return;
+  snprintf(timedBase, sizeof timedBase, "%s", base); timedOn = 1; timedOff = 0;
+  char u[8192]; snprintf(u, sizeof u, "%s?t=0", base);
   video_load(u);
+  timedOn = 1; snprintf(timedBase, sizeof timedBase, "%s", base); /* video_load clears it */
   if (durSec > 0) { timedDur = (int)durSec; dur = durSec; }
 }
 
@@ -164,7 +195,9 @@ void video_unload(void) {
   if (!mpvH) return;
   const char *cmd[] = {"stop", NULL};
   mpv_command(mpvH, cmd);
-  st = VID_IDLE; liveFlag = 0; pos = 0; dur = 0; naud = 0; ntxt = 0; curAud = -1; curTxt = -1; cropOn = 0; cropCur[0] = 0; timedDur = 0;
+  gfx_target_free(&vidT);
+  st = VID_IDLE; liveFlag = 0; pos = 0; dur = 0; naud = 0; ntxt = 0; curAud = -1; curTxt = -1; cropOn = 0; timedDur = 0;
+  timedOn = 0; timedBase[0] = 0; timedOff = 0; cacheAhead = 0; seeking = 0;
 }
 
 void video_play(void) {
@@ -181,18 +214,32 @@ void video_pause(void) {
 
 void video_seek(double sec) {
   if (!mpvH) return;
+  if (timedOn && timedBase[0]) { /* one continuous conversion: each seek loads it again there */
+    if (sec < 0) sec = 0; timedOff = sec; pos = 0; /* mpv restarts at 0: the time reads from the offset on */
+    char u[8192]; snprintf(u, sizeof u, "%s?t=%lld", timedBase, (long long)sec);
+    snprintf(urlBuf, sizeof urlBuf, "%s", u);
+    const char *cmd[] = {"loadfile", urlBuf, "replace", NULL};
+    mpv_command(mpvH, cmd); st = VID_BUFFERING;
+    return;
+  }
   mpv_set_property(mpvH, "time-pos", MPV_FORMAT_DOUBLE, &sec);
 }
 
-double video_time(void) { return pos; }
+double video_time(void) { return timedOn ? timedOff + pos : pos; }
 double video_duration(void) { return dur; }
-double video_buffered_end(void) { double b = pos + 60; if (dur > 0 && b > dur) b = dur; return b; }
+double video_buffered_end(void) { double t = video_time(), b = t + (cacheAhead > 0 ? cacheAhead : 60); if (dur > 0 && b > dur) b = dur; return b; }
 VidState video_state(void) { return st; }
 const char *video_error(void) { return errBuf; }
 int video_live(void) { return liveFlag; }
 int video_has_media(void) { return st != VID_IDLE; }
-void video_set_volume(int pct, int easeMs) { (void)easeMs; if (!mpvH) return; double v = pct; mpv_set_property(mpvH, "volume", MPV_FORMAT_DOUBLE, &v); }
-int video_settling(void) { return 0; }
+void video_set_volume(int pct, int easeMs) {
+  if (!mpvH) return;
+  if (pct < 0) pct = 0; if (pct > 100) pct = 100;
+  if (easeMs <= 0) { vFrom = vTo = pct; vDur = 0; vol_apply((double)pct); return; }
+  vFrom = vDur > 0 ? vFrom + (vTo - vFrom) * fmin(1, (now_s() - vT0) / vDur) : vTo; /* from where it is now */
+  vTo = pct; vT0 = now_s(); vDur = easeMs / 1000.0;
+}
+int video_settling(void) { return seeking; }
 int video_width(void) { return vw; }
 int video_height(void) { return vh; }
 double video_fps(void) { return fpsv; }
@@ -245,18 +292,32 @@ void video_pump(void) { process_events(); }
 
 void video_render(void) {
   if (!mpvGL || !liveFlag) return;
-  /* video_pump() (player tick) already refreshed events/properties this frame: don't round-trip IPC twice */
-  char want[128];
-  if (cropOn) snprintf(want, sizeof want, "%dx%d+%d+%d", cropSW, cropSH, cropSX, cropSY);
-  else want[0] = 0;
-  if (strcmp(want, cropCur)) { /* aspect changed only: re-setting video-crop every frame reconfigures the VO and flickers */
-    snprintf(cropCur, sizeof cropCur, "%s", want);
-    mpv_set_property_string(mpvH, "video-crop", want);
-  }
+  /* video_pump() (player tick) already refreshed events/properties this frame: don't round-trip IPC twice.
+     mpv is never asked to crop (see below): the property stays cleared. */
+  /* mpv fills (0,0,w,h) of whatever FBO is bound (fbo.w/h must be that FBO's real
+     size), so a sub-rectangle video is rendered into its own FBO and composited as
+     one UI quad: direct-to-screen would sink it to the window's bottom-left.
+     The crop itself is a UV sub-rectangle, not mpv's video-crop (which rotates
+     cropped output 180 degrees): full frame in the FBO, source rect sampled out. */
   int sx, syTop, sw, sh; /* drawable pixels, top-left origin, inside the letterboxed UI viewport */
   gfx_layout_to_surface((float)winX, (float)winY, (float)winW, (float)winH, &sx, &syTop, &sw, &sh);
-  if (sw < 1) sw = 1; if (sh < 1) sh = 1;
-  int bottom = surfH - (syTop + sh);
+  if (sw < 2 || sh < 2) return;
+  float u0 = 0, v0 = 0, u1 = 1, v1 = 1;
+  int fw = sw, fh = sh;
+  if (cropOn && vw > 0 && vh > 0 && cropSW > 0 && cropSH > 0) {
+    float s = fmaxf((float)sw / cropSW, (float)sh / cropSH); /* cover: the crop region at full dst resolution */
+    if (s < 0.05f) s = 0.05f;
+    fw = (int)(vw * s + 0.5f); fh = (int)(vh * s + 0.5f);
+    if (fw < 2) fw = 2; if (fh < 2) fh = 2;
+    /* the FBO holds the frame upright (same orientation as a decoded picture): sample the source rect straight out */
+    u0 = cropSX * s / fw; u1 = (cropSX + cropSW) * s / fw;
+    v0 = cropSY * s / fh; v1 = (cropSY + cropSH) * s / fh;
+  }
+  if (cropOn != propCrop) { propCrop = cropOn; mpv_set_property_string(mpvH, "video-crop", ""); } /* never cropped in mpv */
+  if (fw != vidT.w || fh != vidT.h) {
+    gfx_target_free(&vidT);
+    if (!gfx_target_create(&vidT, fw, fh)) { vidT.tex = 0; return; }
+  }
 
   GLint prevFbo = 0, prevVp[4] = {0,0,0,0}, prevArrayBuf = 0, prevProg = 0, prevTex = 0, prevActive = 0;
   GLboolean prevBlend = GL_FALSE, prevScissor = GL_FALSE, prevDepth = GL_FALSE, prevCull = GL_FALSE;
@@ -276,14 +337,15 @@ void video_render(void) {
   GLint prevVao = 0;
 #endif
 
-  glViewport(sx, bottom, sw, sh);
-  mpv_opengl_fbo fbo = { .fbo = (unsigned)prevFbo, .w = sw, .h = sh };
+  gfx_target_begin(&vidT, 0); /* transparent: mpv draws the frame over it */
+  mpv_opengl_fbo fbo = { .fbo = (int)vidT.fbo, .w = vidT.w, .h = vidT.h };
   mpv_render_param params[] = {
     {MPV_RENDER_PARAM_OPENGL_FBO, &fbo},
-    {MPV_RENDER_PARAM_FLIP_Y, &(int){1}},
+    {MPV_RENDER_PARAM_FLIP_Y, &(int){0}},
     {0}
   };
   mpv_render_context_render(mpvGL, params);
+  gfx_target_end();
 
   glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFbo);
   glViewport(prevVp[0], prevVp[1], prevVp[2], prevVp[3]);
@@ -299,4 +361,5 @@ void video_render(void) {
   if (prevDepth) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
   if (prevCull) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
   gfx_invalidate_state(); /* the UI's next batch re-asserts program, texture and blend from scratch */
+  gfx_image(vidT.tex, (float)winX, (float)winY, (float)winW, (float)winH, 0, WHITE_A(255), u0, v0, u1, v1);
 }

@@ -12,7 +12,8 @@ const char *p2p_status(void);                   /* the line for the player's art
 const char *p2p_wait_reason(int waiting);       /* while the player waits (1): "" until it is slow (~7 s at the start, 3 s mid-film), then one short reason; 0 resets */
 int  p2p_peer_line(char *out, int cap);         /* "12 peers · 2.4 MB/s" (" · USB" when the buffer is on the USB drive) while a torrent is active; 0 when there is none */
 void p2p_pace(int playing, int buffering, double durationSec); /* the player, about once a second */
-void p2p_player_closed(void);                   /* torrents and their data go; the engine stays warm a while */
+void p2p_player_closed(void);                   /* torrents and their data go; the engine stays warm a while (a kept local cache stays on disk) */
+void p2p_note_direct_play(void);              /* a direct (non-torrent) title starts: a kept local cache is evicted */
 int  p2p_moved_recently(void);                  /* the window changed place in the last 30 s (a USB drive went): a stream error then is worth one retry */
 void p2p_pump(void);
 void p2p_shutdown(void);                        /* at exit: the engine stops (a few seconds at most) and its window files go */                            /* once per frame */

@@ -80,6 +80,12 @@ int  app_key_held(void);               /* the key being handled repeats a held o
 int  app_ok_down(void);                /* OK is held down now (a sheet's own hold reads it) */
 void  app_clock_draw(float right, float y, float alpha); /* the pages' clock, its right edge at x (the player's too) */
 void  app_clock_top(void); /* the bar's clock over the start screen and the guide (main, last) */
+#ifdef SB_LINUX
+void app_fsbtn_geom(float right, float y, float *x, float *yy); /* the button's 76x76 circle beside the clock pill */
+int  app_fsbtn_hit(float right, float y, float x, float yy);    /* 1 when the pointer is on it */
+void app_fsbtn_draw(float right, float y);                   /* the button beside the clock, drawn with it */
+void app_toggle_fullscreen(void);                            /* fullscreen, or back to tiled/floating */
+#endif
 float app_hold_k(double since);        /* 0..1 of a hold begun then, on the same clock as the card menu's line */
 
 /* ---- the top bar ---- */

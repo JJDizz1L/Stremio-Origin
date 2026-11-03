@@ -268,8 +268,7 @@ int main(int argc, char **argv) {
       if (e.type == SDL_QUIT) { fprintf(stderr, "[exit] SDL_QUIT\n"); app_quit(); }
 #ifdef SB_LINUX
       else if (e.type == SDL_KEYDOWN && (e.key.keysym.sym == SDLK_F11 || (e.key.keysym.sym == SDLK_RETURN && (e.key.keysym.mod & KMOD_ALT)))) { /* desktop fullscreen toggle */
-        Uint32 fl = SDL_GetWindowFlags(win);
-        SDL_SetWindowFullscreen(win, (fl & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP)) ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+        app_toggle_fullscreen();
       }
 #endif
       else if (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) { int k = plat_map_key(&e.key);

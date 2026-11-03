@@ -211,6 +211,9 @@ static void topbar(int cur, float pill, float setF, float searchF, float libPing
   corner(128, searchF, "nav_search", RGB(0x2f, 0xd6, 0x6b), 0, 2);
   corner(40, setF, "nav_set", RGB(0xef, 0x3b, 0x3b), 90 * ease_apply(EASE_OUT, setF), 1);
   lglass_light(0); app_clock_draw(SB_W - 56, 50, 1);
+#ifdef SB_LINUX
+  app_fsbtn_draw(SB_W - 56, 50);
+#endif
 }
 /* Home: a title's backdrop and words, its row (focus: the card with the focus, -1 none; hold 0..1 held on it) */
 static float rowY(void) { return 478 + 18 + text_line_height(31) + 26; }
@@ -504,6 +507,9 @@ static void osd(float a, const char *fb, const char *peers, float usbLit) {
   float W0 = SB_W, H = SB_H, bx = 72, rowTop = H - 54 - 94, L25 = text_line_height(25), barTop = rowTop - 30 - L25, trkC = barTop + L25 / 2, ttlBot = barTop - 32;
   gfx_rrect_v(0, H * 0.44f, W0, H * 0.3f, 0, BLACK_A(0), BLACK_A(140)); gfx_rrect_v(0, H * 0.74f, W0, H * 0.26f, 0, BLACK_A(140), BLACK_A(224)); gfx_rrect_v(0, 0, W0, 240, 0, BLACK_A(140), BLACK_A(0));
   app_clock_draw(W0 - 64, 46, 1);
+#ifdef SB_LINUX
+  app_fsbtn_draw(W0 - 64, 46);
+#endif
   if (peers) { float tw = text_width(peers, 24, 600, 0), w = 16 + 10 + 12 + tw + 24;
     lglass_shell(72, 52, w, 46, 23, RGBA(10, 12, 22, 150), 1); gfx_circle(72 + 2 + 16 + 5, 52 + 23, 5, RGB(0x4a, 0xde, 0x80));
     text_draw(peers, 72 + 40, 52 + (46 - text_line_height(24)) / 2, 24, 600, WHITE_A(255), 0, 0, ALIGN_LEFT);

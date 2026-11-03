@@ -152,3 +152,6 @@ int plat_panel_lines(void) {
   int w = 0, h = 0; if (!res || !res(&w, &h)) return 0;
   return h;
 }
+
+int plat_fullscreen(void) { return 0; }
+void plat_set_fullscreen(int on) { (void)on; }

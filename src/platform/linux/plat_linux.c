@@ -10,6 +10,8 @@
 #include <unistd.h>
 
 static char assetDir[1024], dataDir[1024];
+static SDL_Window *win; /* for the fullscreen toggle (leaving it restores the tiled/floating window) */
+static int wantFs; /* the state asked for: some compositors resize without ever reporting fullscreen back */
 void plat_pre_init(const char *appId) { (void)appId;
   const char *a = getenv("SB_ASSETS");
   if (a) snprintf(assetDir, sizeof assetDir, "%s", a);
@@ -22,7 +24,7 @@ void plat_pre_init(const char *appId) { (void)appId;
   char cmd[1200]; snprintf(cmd, sizeof cmd, "mkdir -p \"%s\"", dataDir); if (system(cmd)) {}
   applog_start(dataDir);
 }
-void plat_post_window(SDL_Window *w) { (void)w; }
+void plat_post_window(SDL_Window *w) { win = w; }
 const char *plat_asset_dir(void) { return assetDir; }
 const char *plat_data_dir(void) { return dataDir; }
 void plat_window_size(int *w, int *h, Uint32 *flags) {
@@ -57,3 +59,8 @@ void plat_luna_cancel(unsigned long handle) { (void)handle; }
 void plat_luna_pump(void) {}
 int plat_luna_send(const char *uri, const char *payload) { (void)uri; (void)payload; return 0; }
 int plat_panel_lines(void) { return 0; }
+int plat_fullscreen(void) {
+  if (wantFs) return 1;
+  if (!win) return 0; Uint32 f = SDL_GetWindowFlags(win); return (f & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP)) != 0;
+}
+void plat_set_fullscreen(int on) { wantFs = !!on; if (!win) return; SDL_SetWindowFullscreen(win, on ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0); }

@@ -41,4 +41,7 @@ void plat_luna_pump(void);
 int plat_luna_send(const char *uri, const char *payload);
 /* the panel's lines (2160 on a 4K TV) from the platform itself, without a system service; 0 when unknown */
 int plat_panel_lines(void);
+/* desktop fullscreen: 1 while the window fills the screen (toggle back restores the tiled/floating window) */
+int plat_fullscreen(void);
+void plat_set_fullscreen(int on);
 #endif
