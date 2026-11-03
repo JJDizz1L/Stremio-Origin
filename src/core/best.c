@@ -309,11 +309,18 @@ void best_learn(const char *what, int yes) {
 static int truthy(const cJSON *v) { return cJSON_IsTrue(v) || (cJSON_IsNumber(v) && v->valuedouble != 0) || (cJSON_IsString(v) && v->valuestring && *v->valuestring) || cJSON_IsObject(v) || cJSON_IsArray(v); }
 static int webos_major(void) { const char *d = plat_device_name(), *p = d ? strstr(d, "webOS ") : NULL; return p ? atoi(p + 6) : 0; }
 static void *caps_worker(void *arg) {
-  (void)arg; TvCaps c = FALLBACK;
+  (void)arg; TvCaps c = FALLBACK; int sure = 0, dtsCfg = -1, v = 0;
+#ifdef SB_LINUX
+  /* desktop: no TV pipeline to ask — mpv decodes everything itself, so the caps describe the display (maxRes from
+     its height) plus what mpv plays: DTS/TrueHD natively, HDR/DV shown tone-mapped, AV1 through dav1d (in hardware
+     when the Decoding setting's backend offers it). SB_TVCAPS below still overrides per field. */
+  { int lines = plat_panel_lines(); c.maxRes = lines >= 2160 ? 2160 : 1080; sure = lines > 0;
+    c.hdr = 1; c.dv = 1; c.av1 = 1; c.dts = 1; c.truehd = 1; }
+#else
   char *r = plat_luna_call("luna://com.webos.service.tv.systemproperty/getSystemInfo", "{\"keys\":[\"UHD\"]}", 3000);
   cJSON *j = r ? cJSON_Parse(r) : NULL; free(r); const cJSON *u = cJSON_GetObjectItemCaseSensitive(j, "UHD");
   if (cJSON_IsTrue(u) || (cJSON_IsString(u) && !strcmp(u->valuestring, "true"))) c.maxRes = 2160;
-  int sure = u != NULL; cJSON_Delete(j);
+  sure = u != NULL; cJSON_Delete(j);
   if (!sure) { int lines = plat_panel_lines(); if (lines >= 2160) c.maxRes = 2160; /* the service refused or kept quiet: the panel as SDL sees it */
     fprintf(stderr, "[best] no answer on the panel from the TV: %d lines from SDL; asked again next start\n", lines); }
   r = plat_luna_call("luna://com.webos.service.config/getConfigs", "{\"configNames\":[\"tv.model.supportHDR\",\"tv.model.supportDolbyVisionHDR\"]}", 3000);
@@ -328,7 +335,7 @@ static void *caps_worker(void *arg) {
      - TrueHD: these TVs only pass it through to an eARC receiver and are silent without one: never counted.
      A wrong "no" only costs a little score; a wrong "yes" would pick a stream that plays without sound or
      picture, so every doubt is a no. */
-  int v = webos_major(), dtsCfg = -1;
+  v = webos_major(); dtsCfg = -1;
   c.dts = 0; c.av1 = v >= 6 || (v == 5 && c.maxRes == 2160); c.truehd = 0;
   r = plat_luna_call("luna://com.webos.service.config/getConfigs", "{\"configNames\":[\"tv.model.*\"]}", 3000);
   j = r ? cJSON_Parse(r) : NULL; free(r); k = cJSON_GetObjectItemCaseSensitive(j, "configs");
@@ -337,11 +344,16 @@ static void *caps_worker(void *arg) {
       if (strstr(lk, "dts") && !strstr(lk, "pass") && !strstr(lk, "spdif")) { dtsCfg = cJSON_IsTrue(e); fprintf(stderr, "[best] the TV's config: %s %s\n", e->string, dtsCfg ? "true" : "false"); } } }
   cJSON_Delete(j);
   c.dts = dtsCfg == 1; /* what playback learned is applied on the main thread (caps_landed) */
+#endif
   const char *ov = getenv("SB_TVCAPS"); /* testing: SB_TVCAPS="maxRes=2160,hdr=1,dv=1,av1=0,dts=1,truehd=0" */
   if (ov) { int x; const char *p;
     if ((p = strstr(ov, "maxRes=")) && sscanf(p + 7, "%d", &x) == 1) c.maxRes = x; if ((p = strstr(ov, "hdr=")) && sscanf(p + 4, "%d", &x) == 1) c.hdr = x; if ((p = strstr(ov, "dv=")) && sscanf(p + 3, "%d", &x) == 1) c.dv = x;
     if ((p = strstr(ov, "av1=")) && sscanf(p + 4, "%d", &x) == 1) c.av1 = x; if ((p = strstr(ov, "dts=")) && sscanf(p + 4, "%d", &x) == 1) c.dts = x; if ((p = strstr(ov, "truehd=")) && sscanf(p + 7, "%d", &x) == 1) c.truehd = x; }
+#ifdef SB_LINUX
+  fprintf(stderr, "[best] PC: %dp, HDR %d, Dolby Vision %d, AV1 %d, DTS %d, TrueHD %d\n", c.maxRes, c.hdr, c.dv, c.av1, c.dts, c.truehd);
+#else
   fprintf(stderr, "[best] TV: %dp, HDR %d, Dolby Vision %d, AV1 %d, DTS %d, TrueHD %d (webOS %d)\n", c.maxRes, c.hdr, c.dv, c.av1, c.dts, c.truehd, v);
+#endif
   pthread_mutex_lock(&mailMu); mail.caps = c; mail.capsSure = sure; mail.dtsCfg = dtsCfg; mail.capsReady = 1; pthread_mutex_unlock(&mailMu);
   return NULL;
 }

@@ -58,7 +58,7 @@ unsigned long plat_luna_subscribe(const char *uri, const char *payload, PlatLuna
 void plat_luna_cancel(unsigned long handle) { (void)handle; }
 void plat_luna_pump(void) {}
 int plat_luna_send(const char *uri, const char *payload) { (void)uri; (void)payload; return 0; }
-int plat_panel_lines(void) { return 0; }
+int plat_panel_lines(void) { SDL_DisplayMode m; if (SDL_GetDesktopDisplayMode(0, &m) == 0 && m.h > 0) return m.h; return 0; } /* the desktop's own height: the caps' maxRes (a 4K screen keeps 4K streams) */
 int plat_fullscreen(void) {
   if (wantFs) return 1;
   if (!win) return 0; Uint32 f = SDL_GetWindowFlags(win); return (f & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP)) != 0;
