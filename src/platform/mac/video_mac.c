@@ -15,6 +15,7 @@ void video_unload(void) { st = VID_IDLE; live = 0; url[0] = 0; }
 void video_play(void) { if (st == VID_PAUSED) { st = VID_PLAYING; t0 = SDL_GetTicks() / 1000.0 - pos; } }
 int video_has_media(void) { return live; }
 void video_set_volume(int pct, int easeMs) { (void)pct; (void)easeMs; }
+void video_set_hwdec(const char *mode) { (void)mode; } /* the Mac preview simulates playback: no decoder to choose */
 void video_pause(void) { if (st == VID_PLAYING) { st = VID_PAUSED; pausedAt = pos; } }
 void video_seek(double s) { pos = s < 0 ? 0 : s > dur ? dur : s; t0 = SDL_GetTicks() / 1000.0 - pos; }
 double video_time(void) { return pos; }

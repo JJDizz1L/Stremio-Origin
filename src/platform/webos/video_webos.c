@@ -327,6 +327,7 @@ void video_set_volume(int pct, int easeMs) {
   else snprintf(b, sizeof b, "{\"mediaId\":\"%s\",\"volume\":%d}", mid, pct);
   call("setVolume", b, NULL, NULL);
 }
+void video_set_hwdec(const char *mode) { (void)mode; } /* the TV decodes in its own pipeline: nothing to choose */
 void video_pause(void) { pthread_mutex_lock(&mu); S.pausedByUs = 1; S.st = VID_PAUSED; pthread_mutex_unlock(&mu); simple("pause"); }
 /* presses add up: the shown position moves at once, the pipeline gets one seek 350 ms after the last (four
    seeks in under a second were followed by a dead pipeline) */

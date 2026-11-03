@@ -1,5 +1,6 @@
 /* Linux desktop: libmpv's OpenGL render API. */
 #include "core/video.h"
+#include "core/store.h"
 #include "platform/plat.h"
 #include "ui/gfx.h"
 #include <SDL2/SDL.h>
@@ -152,12 +153,27 @@ static void process_events(void) {
   vol_fade_tick();
 }
 
+/* Decoding (Settings > Playback > Decoding): anything this mpv takes on Linux. Unknown values fall back to auto. */
+static const char *HWDEC_OK[] = { "auto", "auto-safe", "auto-copy", "no", "nvdec", "nvdec-copy", "vaapi", "vaapi-copy", "vdpau", "cuda", "vulkan", "qsv", NULL };
+static const char *hwdec_mode(void) {
+  const char *m = store_get("hwdecMode", "auto");
+  for (int i = 0; HWDEC_OK[i]; i++) if (!strcmp(m, HWDEC_OK[i])) return m;
+  return "auto";
+}
+void video_set_hwdec(const char *mode) { /* live for the next title played (the running file keeps its decoder) */
+  if (!mpvH || !mode) return;
+  const char *m = mode; int ok = 0;
+  for (int i = 0; HWDEC_OK[i]; i++) if (!strcmp(m, HWDEC_OK[i])) { ok = 1; break; }
+  if (!ok) m = "auto";
+  if (mpv_set_property_string(mpvH, "hwdec", m) == 0) fprintf(stderr, "[video] hwdec %s\n", m);
+}
+
 int video_init(const char *appId) {
   (void)appId;
   mpvH = mpv_create();
   if (!mpvH) return 0;
   mpv_set_option_string(mpvH, "vo", "libmpv");
-  mpv_set_option_string(mpvH, "hwdec", "auto");
+  mpv_set_option_string(mpvH, "hwdec", hwdec_mode());
   mpv_set_option_string(mpvH, "sid", "no");        /* the app draws its own UI/subs on top: no auto subs, no OSD */
   mpv_set_option_string(mpvH, "sub-auto", "no");
   mpv_set_option_string(mpvH, "osd-level", "0");

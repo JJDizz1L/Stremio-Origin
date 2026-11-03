@@ -22,6 +22,7 @@ const char *video_error(void);
 int    video_live(void);                     /* 1 once a first frame has been shown */
 int    video_has_media(void);            /* the TV has taken the stream (its media handle exists) */
 void   video_set_volume(int pct, int easeMs);  /* the stream's volume, 0-100, reached over easeMs */
+void   video_set_hwdec(const char *mode); /* decoding backend ("auto", "no", "nvdec", ...): takes effect on the next title played */
 int    video_settling(void);                 /* 1 while a seek is on its way (asked, not yet done): the picture is not where it will be */
 int    video_width(void);
 int    video_height(void);

@@ -8,6 +8,7 @@
 #include "core/keys.h"
 #include "core/i18n.h"
 #include "core/store.h"
+#include "core/video.h"
 #include "core/json.h"
 #include "core/best.h"
 #include "ui/glass.h"
@@ -49,6 +50,7 @@ static const Opt SEEK[] = { { "5", "5s" }, { "10", "10s" }, { "15", "15s" }, { "
 static const Opt CACHE_MB[] = { { "0", "Off" }, { "512", "512 MB" }, { "1024", "1 GB" }, { "2048", "2 GB" } }; /* Cache torrents locally: how much of the last torrent stays on disk */
 static const Opt DTSM[] = { { "auto", "Auto" }, { "convert", "Convert" }, { "off", "Off" } }; /* DTS sound: found out by playing, always converted, or left to the TV */
 static const Opt ASPECT[] = { { "fit", "Original" }, { "fill", "Fill the screen" }, { "zoom", "Zoom" } };
+static const Opt HWDEC[] = { { "auto", "Auto" }, { "auto-safe", "Auto, safe" }, { "auto-copy", "Auto, copy-back" }, { "no", "Software" }, { "nvdec", "Nvidia NVDEC" }, { "nvdec-copy", "Nvidia NVDEC (copy-back)" }, { "vaapi", "VA-API (Intel/AMD)" }, { "vaapi-copy", "VA-API (copy-back)" }, { "vdpau", "VDPAU" }, { "cuda", "Nvidia CUDA" }, { "vulkan", "Vulkan" }, { "qsv", "Intel Quick Sync" } };
 static const Opt SIZES[] = { { "0", "72%" }, { "1", "80%" }, { "2", "100%" }, { "3", "120%" }, { "4", "140%" }, { "5", "160%" }, { "6", "180%" } };
 static const Opt COLORS[] = { { "#ffffff", "White" }, { "#ffe600", "Yellow" }, { "#00e5ff", "Cyan" } };
 static const Opt OUTL[] = { { "#000000", "Black" }, { "#ffffff", "White" } };
@@ -58,7 +60,7 @@ static const Opt SS_OPTS[] = { { "0", "Off" }, { "1", "1 min" }, { "2", "2 min" 
 static const Opt ACCENT_OPTS[] = { { "logo", "From the logo" }, { "adaptive", "From the artwork" }, { "purple", "Purple" }, { "violet", "Violet" }, { "fuchsia", "Fuchsia" }, { "pink", "Pink" }, { "rose", "Rose" }, { "red", "Red" }, { "orange", "Orange" }, { "amber", "Amber" }, { "gold", "Gold" }, { "lime", "Lime" }, { "green", "Green" }, { "emerald", "Emerald" }, { "teal", "Teal" }, { "cyan", "Cyan" }, { "sky", "Sky" }, { "blue", "Blue" }, { "indigo", "Indigo" }, { "graphite", "Graphite" } };
 #define NCAT 9
 #define MAXROWS 48
-static Setting playBase[9], playS[9], subsS[6], audS[5], lookS[2], langS[2], keyS[4], addonS[40], acctS[1], supS[6];
+static Setting playBase[10], playS[10], subsS[6], audS[5], lookS[2], langS[2], keyS[4], addonS[40], acctS[1], supS[6];
 static Cat cats[NCAT]; static int ncat; /* (Keys leaves when this build carries every key) */
 
 /* the layout, in the web's pixels: the grid is centred, 1600 wide, 150 from the top */
@@ -149,6 +151,7 @@ static void play_layout(void) {
   const TvCaps *tc = best_caps(); if (tc && tc->dv) playS[n++] = playBase[7];
   iUsb = n; playS[n++] = playBase[5];
   playS[n++] = playBase[8]; /* Cache torrents locally, under the USB row */
+  playS[n++] = playBase[9]; /* Decoding, last: it only matters when the picture is wrong */
   for (int i = 0; i < ncat; i++) if (cats[i].opts == playS) { cats[i].n = n; if (S.cat == i && S.idx >= n) S.idx = n - 1; }
 }
 static void usb_row(void) {
@@ -168,6 +171,7 @@ static void build(void) {
   set_s(&playBase[7], "dv7Convert", "Dolby Vision for Blu-ray copies", "Their picture is converted on this TV so it shows in Dolby Vision, not HDR10", OO, 2, "true");
   set_s(&playBase[6], "bgTrailerVol", "Volume", "The sound comes up softly to this level", SVOL, 10, "70"); playBase[6].sub = 1; /* (shown right under the trailers while they are on: play_layout; drawn as theirs, set in) */
   set_s(&playBase[8], "p2pCacheMB", "Cache torrents locally", "Keep the last torrent on disk for fast replays, until another title plays. Gone on exit", CACHE_MB, 4, "0");
+  set_s(&playBase[9], "hwdecMode", "Decoding", "Auto lets mpv choose. Lines or glitches in the picture: try Software. Takes effect on the next title played", HWDEC, 12, "auto");
   usb_row();
   set_s(&subsS[0], "subsLang", "Default subtitles", "Chosen by itself when a film starts", LANG_OPTS, 18, "eng");
   set_s(&subsS[1], "subtitleSize", "Size", "Also in the player, under Subtitles", SIZES, 7, "2");
@@ -244,6 +248,7 @@ int settings_apply_pref(const char *k, const char *v) {
     if (SCR == SCR_SET) { int c = S.cat, i = S.idx, z = S.zone; enter(NULL); S.cat = c; S.idx = i; S.zone = z == 2 ? 1 : z; show_cat(c, 0); S.enterAt = app_now() - 10; } return 1; }
   store_set(k, v); S.dirty = 1;
   if (!strcmp(k, "bingeWatch")) store_set("enableNextVideo", v);
+  if (!strcmp(k, "hwdecMode")) video_set_hwdec(v);
   if (!strcmp(k, "bgTrailer")) play_layout();
   if (!strcmp(k, "accent")) accent_apply();
   return 1;
@@ -265,6 +270,7 @@ static void set_val(Setting *o, const char *v, int dir) {
       int c = S.cat, i = S.idx, z = S.zone; enter(NULL); S.cat = c; S.idx = i; S.zone = z == 2 ? 1 : z; show_cat(c, 0); S.enterAt = app_now() - 10; } return; } /* the same place, in the new language */
   store_set(o->k, v); S.dirty = 1;
   if (!strcmp(o->k, "bgTrailer")) play_layout(); /* its volume row comes and goes with it, right under it */
+  if (!strcmp(o->k, "hwdecMode")) video_set_hwdec(v); /* live for the next title played */
   if (!strncmp(o->k, "adOn_", 5)) { board_invalidate(); cats[5].n = addon_opts(); return; } /* an addon on/off here: rows, metadata and streams follow */
   if (!strcmp(o->k, "bingeWatch")) store_set("enableNextVideo", v);
   if (!strcmp(o->k, "accent")) accent_apply();
