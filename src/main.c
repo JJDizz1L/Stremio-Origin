@@ -96,6 +96,7 @@ static int vsyncOn __attribute__((unused));   /* SB_VSYNC=1: let the driver wait
 #include "screens/settings.h"
 #include "screens/splash.h"
 #include "screens/player.h"
+#include "screens/saver.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
@@ -316,7 +317,7 @@ int main(int argc, char **argv) {
     app_tick(dt); splash_tick(dt);
     Uint32 tA = SDL_GetTicks();
     gfx_begin(player_live() ? RGBA(0, 0, 0, 0) : PAGE); /* the video plane shows through the transparent window */
-    video_render(); /* desktop GL backends draw the decoded frame here, under the UI */
+    if (!saver_covers()) video_render(); /* desktop GL backends draw the decoded frame here, under the UI (covered: the screensaver alone, nothing under it drawn) */
     { static int bench = -2, benchCalls = 0; if (bench == -2) { bench = getenv("SB_BENCH") ? atoi(getenv("SB_BENCH")) : -1; benchCalls = getenv("SB_BENCHCALLS") ? atoi(getenv("SB_BENCHCALLS")) : 0; }
       static GLuint bt[64]; static int btN = -1; if (btN < 0) { btN = getenv("SB_BENCHTEX") ? atoi(getenv("SB_BENCHTEX")) : 0; if (btN > 64) btN = 64; int ch = getenv("SB_BENCHTEX_ALPHA") ? 1 : 4, tw = getenv("SB_BENCHTEX_W") ? atoi(getenv("SB_BENCHTEX_W")) : 300, th = getenv("SB_BENCHTEX_H") ? atoi(getenv("SB_BENCHTEX_H")) : 40; int lin = getenv("SB_BENCHTEX_NEAREST") ? 0 : 1;
         unsigned char *px = malloc((size_t)tw * th * ch); for (int i = 0; i < btN; i++) { memset(px, 40 + i * 5, (size_t)tw * th * ch); bt[i] = gfx_tex_create(px, tw, th, ch, lin); } free(px); } /* SB_BENCHTEX=N: N distinct textures bound per frame */

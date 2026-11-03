@@ -534,6 +534,10 @@ void gfx_target_begin(GfxTarget *t, uint32_t c) {
   memcpy(saved.clips, clips, sizeof clips); memcpy(saved.opac, opac, sizeof opac); memcpy(saved.offx, offx, sizeof offx); memcpy(saved.offy, offy, sizeof offy); memcpy(saved.scx, scx, sizeof scx); memcpy(saved.scy, scy, sizeof scy); memcpy(saved.sox, sox, sizeof sox); memcpy(saved.soy, soy, sizeof soy); memcpy(saved.scOx, scOx, sizeof scOx); memcpy(saved.scOy, scOy, sizeof scOy);
   nclip = 0; nopac = 0; noff = 0; nsc = 0; curOpac = 1; curOx = curOy = 0; curSx = curSy = 1; curSox = curSoy = 0;
   fadeOff = 1;
+  /* a bake's draws assume blending on (a picture at half strength over a clear): the previous frame's last batch may
+     have left it off (an opaque fill skips the read-modify-write), which baked translucent layers instead of dimmed
+     opaque ones — the paused film showing through the screensaver */
+  glEnable(GL_BLEND); glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA); blendOn = 1;
   glBindFramebuffer(GL_FRAMEBUFFER, t->fbo); surfW = t->w; surfH = t->h; scl = (float)t->w / SB_W; glViewport(0, 0, t->w, t->h);
   glDisable(GL_SCISSOR_TEST);
   glClearColor(((c >> 16) & 255) / 255.0f, ((c >> 8) & 255) / 255.0f, (c & 255) / 255.0f, ((c >> 24) & 255) / 255.0f); glClear(GL_COLOR_BUFFER_BIT);
