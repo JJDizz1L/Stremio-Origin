@@ -2,3 +2,14 @@ build/
 dist/
 *.o
 .DS_Store
+# local agent working notes (do not sync)
+AGENTS.md
+# editor / IDE droppings
+.vscode/
+.idea/
+*.swp
+*~
+# local run artifacts (do not sync)
+*.log
+core
+core.*
